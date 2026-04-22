@@ -122,7 +122,7 @@ export async function getAvailabilityForSalon(salonId: string, from: string, to:
 
   const rulesRes = await withTx((client) =>
     client.query(
-      "SELECT weekday, start_minute, end_minute, is_active FROM working_rules WHERE salon_id = $1 AND is_active = true",
+      "SELECT weekday, start_minute, end_minute, is_active FROM working_rules WHERE salon_id = $1",
       [salonId]
     )
   );
@@ -163,6 +163,7 @@ export async function getAvailabilityForSalon(salonId: string, from: string, to:
 
   const rulesByWeekday = new Map<number, { startMinute: number; endMinute: number }[]>();
   for (const r of rulesRes.rows) {
+    if (!Boolean(r.is_active)) continue;
     const list = rulesByWeekday.get(Number(r.weekday)) ?? [];
     list.push({ startMinute: Number(r.start_minute), endMinute: Number(r.end_minute) });
     rulesByWeekday.set(Number(r.weekday), list);

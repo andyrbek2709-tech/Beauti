@@ -813,6 +813,7 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
     inline_keyboard: [
       [{ text: "Закрыть даты", callback_data: "adm:close-dates" }],
       [{ text: "Сообщение клиентам", callback_data: "adm:broadcast:start" }],
+      [{ text: "Очистить график", callback_data: "adm:clear-schedule:start" }],
       [{ text: "Назад", callback_data: "adm:menu" }]
     ]
   });
@@ -1071,6 +1072,10 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
         "",
         "Сообщения клиентам",
         "Раздел «Настройки» → «Сообщение клиентам». Введите текст и отправьте всем клиентам.",
+        "",
+        "Как очистить график",
+        "Если нужно начать заново, откройте «Настройки» → «Очистить график».",
+        "Это удалит рабочие дни, время и закрытые даты. После этого задайте новый график.",
         "",
         "Если не уверены — смело нажимайте кнопки. Все шаги простые и понятные."
       ].join("\n"),
@@ -1751,37 +1756,42 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
           });
           await notifySalonAdmin(salonId, `Настройки применены: сетка записи ${slotMinutes} мин.`);
         }
-      } else if (data === "adm:reset:start") {
+      } else if (data === "adm:clear-schedule:start") {
         await sendTelegramMessage(
           botToken,
           chatId,
-          "Внимание: будет сброшен текущий режим (паузы и шаблон графика). Это действие необратимо.",
+          [
+            "Вы хотите очистить график?",
+            "",
+            "Будет удалено:",
+            "• рабочие дни",
+            "• рабочее время",
+            "• длительность записи",
+            "• закрытые даты"
+          ].join("\n"),
           {
             reply_markup: {
               inline_keyboard: [
-                [{ text: "Да, продолжить", callback_data: "adm:reset:confirm1" }],
-                [{ text: "Нет, отмена", callback_data: "adm:menu" }]
+                [{ text: "Очистить", callback_data: "adm:clear-schedule:confirm" }],
+                [{ text: "Отмена", callback_data: "adm:clear-schedule:cancel" }]
               ]
             }
           }
         );
-      } else if (data === "adm:reset:confirm1") {
-        await sendTelegramMessage(
-          botToken,
-          chatId,
-          "Подтвердите еще раз: точно сбросить настройки?",
-          {
-            reply_markup: {
-              inline_keyboard: [
-                [{ text: "Да, сбросить", callback_data: "adm:reset:confirm2" }],
-                [{ text: "Нет, отмена", callback_data: "adm:menu" }]
-              ]
-            }
-          }
-        );
-      } else if (data === "adm:reset:confirm2") {
+      } else if (data === "adm:clear-schedule:cancel") {
+        await sendTelegramMessage(botToken, chatId, "Очистка отменена.", { reply_markup: settingsMenuKeyboard() });
+      } else if (data === "adm:clear-schedule:confirm") {
         await pool.query("UPDATE booking_pauses SET is_active = false, updated_at = now() WHERE salon_id = $1", [salonId]);
         await pool.query("UPDATE salon_work_patterns SET is_active = false, updated_at = now() WHERE salon_id = $1", [salonId]);
+        await pool.query("DELETE FROM schedule_exceptions WHERE salon_id = $1", [salonId]);
+        await pool.query("DELETE FROM working_rules WHERE salon_id = $1", [salonId]);
+        for (let weekday = 0; weekday <= 6; weekday += 1) {
+          await pool.query(
+            `INSERT INTO working_rules (salon_id, weekday, start_minute, end_minute, is_active)
+             VALUES ($1,$2,600,1200,false)`,
+            [salonId, weekday]
+          );
+        }
         await pool.query(
           `INSERT INTO master_settings (salon_id, slot_duration_minutes, booking_horizon_days, cancel_cutoff_hours, timezone)
            VALUES ($1,60,14,2,$2)
@@ -1799,10 +1809,16 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
         await sendTelegramMessage(
           botToken,
           chatId,
-          "Настройки сброшены. По умолчанию установлено: сетка 1 час, горизонт записи 14 дней. Теперь выберите новый регламент работы.",
-          { reply_markup: adminMenuKeyboard() }
+          "График очищен.\nЗадайте рабочие дни и время, чтобы открыть запись для клиентов.",
+          {
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: "Перейти в График", callback_data: "adm:section:schedule" }],
+                [{ text: "В Настройки", callback_data: "adm:section:settings" }]
+              ]
+            }
+          }
         );
-        await showScheduleMonthPicker(chatId);
       } else if (data.startsWith("adm:sch:month:")) {
         const mode = data.replace("adm:sch:month:", "").trim() === "next" ? "next" : "current";
         const monthRange = getMonthRange(mode);
