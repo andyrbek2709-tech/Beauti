@@ -1078,6 +1078,25 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
     );
   };
 
+  const showFirstRunHelpIfNeeded = async (chatId: number, adminTgUserId: string): Promise<void> => {
+    const seen = await pool.query(
+      `SELECT 1
+       FROM audit_logs
+       WHERE salon_id = $1
+         AND action = 'admin_help_seen'
+         AND payload_json->>'adminTelegramUserId' = $2
+       LIMIT 1`,
+      [salonId, adminTgUserId]
+    );
+    if (seen.rowCount) return;
+
+    await renderHelp(chatId);
+    await pool.query(
+      "INSERT INTO audit_logs (salon_id, action, payload_json) VALUES ($1,'admin_help_seen',$2)",
+      [salonId, JSON.stringify({ adminTelegramUserId: adminTgUserId, shownAt: new Date().toISOString() })]
+    );
+  };
+
   const renderAdmin14Days = async (chatId: number) => {
     const days = Array.from({ length: 14 }, (_, i) => dateKeyByOffset(i));
     const buttons: Array<{ text: string; callback_data: string }> = [];
@@ -1250,13 +1269,15 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
         );
         return res.json({ ok: true, duplicate: false });
       }
-      if (text === "/start" || text === "/help") {
+      const normalized = text.toLowerCase();
+      if (text === "/start" || normalized === "старт" || text === "/help") {
         await sendTelegramMessage(
           botToken,
           chatId,
           `Здравствуйте! Это бот мастера салона "${salonName}".`,
           { reply_markup: adminMenuKeyboard() }
         );
+        await showFirstRunHelpIfNeeded(chatId, fromId);
         await renderBookingsHome(chatId);
       } else if (text === "/status") {
         await sendTelegramMessage(botToken, chatId, "Подключение активно. Бот работает корректно.");
