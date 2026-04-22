@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Beautime Booking</title>
+  <link rel="stylesheet" href="/assets/styles.css" />
+</head>
+<body>
+  <main class="container">
+    <section class="card">
+      <h1>Онлайн-запись</h1>
+      <p class="muted">Запишитесь за пару шагов</p>
+      <label>Salon ID</label>
+      <input id="salonId" placeholder="Введите salon id" />
+      <div class="row">
+        <div>
+          <label>Дата с</label>
+          <input id="fromDate" type="date" />
+        </div>
+        <div>
+          <label>Дата по</label>
+          <input id="toDate" type="date" />
+        </div>
+      </div>
+      <button id="loadSlots">Показать время</button>
+      <p id="availabilityMsg" class="muted"></p>
+    </section>
+
+    <section class="card">
+      <h2>Выберите время</h2>
+      <div id="slots" class="grid"></div>
+    </section>
+
+    <section class="card">
+      <h2>Подтверждение</h2>
+      <p class="muted">Выбран слот: <span id="selectedSlot">не выбран</span></p>
+      <label>Имя</label>
+      <input id="clientName" placeholder="Ваше имя" />
+      <label>Телефон</label>
+      <input id="clientPhone" placeholder="+7..." />
+      <button id="bookBtn">Записаться</button>
+      <p id="bookMsg"></p>
+    </section>
+  </main>
+  <script src="/assets/web-app.js"></script>
+</body>
+</html>

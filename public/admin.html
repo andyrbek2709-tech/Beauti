@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Beautime Admin</title>
+  <link rel="stylesheet" href="/assets/styles.css" />
+</head>
+<body>
+  <main class="container">
+    <section class="card">
+      <h1>Админка салона</h1>
+      <p class="muted">Вход и настройка Telegram</p>
+      <div class="row">
+        <button id="tabLogin">Вход</button>
+        <button id="tabRegister" class="secondary">Регистрация</button>
+      </div>
+    </section>
+
+    <section class="card" id="loginCard">
+      <h2>Вход</h2>
+      <label>Email</label>
+      <input id="loginEmail" type="email" />
+      <label>Пароль</label>
+      <input id="loginPassword" type="password" />
+      <button id="loginBtn">Войти</button>
+      <p id="authMsg"></p>
+    </section>
+
+    <section class="card hidden" id="registerCard">
+      <h2>Регистрация</h2>
+      <label>Название салона</label>
+      <input id="regSalonName" />
+      <label>Email</label>
+      <input id="regEmail" type="email" />
+      <label>Пароль</label>
+      <input id="regPassword" type="password" />
+      <button id="registerBtn">Создать аккаунт</button>
+      <p id="registerMsg"></p>
+    </section>
+
+    <section class="card hidden" id="inviteCard">
+      <h2>Подключение по инвайту</h2>
+      <label>Токен инвайта</label>
+      <input id="inviteToken" />
+      <label>Название салона</label>
+      <input id="inviteSalonName" />
+      <label>Slug салона (опционально)</label>
+      <input id="inviteSalonSlug" placeholder="beauty-lab" />
+      <label>Email</label>
+      <input id="inviteEmail" type="email" />
+      <label>Пароль</label>
+      <input id="invitePassword" type="password" />
+      <label>Telegram Bot Token</label>
+      <input id="inviteBotToken" />
+      <label>Telegram User ID</label>
+      <input id="inviteTelegramUserId" />
+      <button id="acceptInviteBtn">Активировать салон</button>
+      <p id="inviteMsg"></p>
+    </section>
+
+    <section class="card hidden" id="integrationCard">
+      <h2>Telegram интеграция</h2>
+      <p class="muted">1) Создайте бота в BotFather, 2) вставьте token и ваш telegram user id, 3) сохраните и используйте webhook данные ниже.</p>
+      <div class="card" style="margin-top:8px;">
+        <h2 style="font-size:16px;">Как создать бота (быстро)</h2>
+        <ol class="muted" style="padding-left:18px; margin:0;">
+          <li>Откройте Telegram и найдите <strong>@BotFather</strong>.</li>
+          <li>Нажмите <strong>/newbot</strong> и задайте имя бота.</li>
+          <li>Задайте username (должен заканчиваться на <strong>bot</strong>).</li>
+          <li>Скопируйте выданный <strong>Bot Token</strong> и вставьте в поле ниже.</li>
+          <li>Узнайте свой Telegram ID (через бота вида <strong>@userinfobot</strong>) и вставьте в поле ниже.</li>
+          <li>Нажмите <strong>Подключить бота автоматически</strong>.</li>
+        </ol>
+      </div>
+      <label>Bot Token</label>
+      <input id="botToken" />
+      <label>Telegram User ID</label>
+      <input id="telegramUserId" />
+      <button id="autoSetupTelegramBtn">Подключить бота автоматически</button>
+      <button id="saveTelegramBtn">Сохранить</button>
+      <button id="checkTelegramBtn" class="secondary">Проверить подключение</button>
+      <button id="checkAllTelegramBtn">Проверить всё</button>
+      <button id="copySupportTemplateBtn" class="secondary">Скопировать шаблон для поддержки</button>
+      <p id="integrationMsg"></p>
+      <label>Webhook Path</label>
+      <input id="webhookPath" readonly />
+      <label>Webhook Secret</label>
+      <input id="webhookSecret" readonly />
+      <p id="integrationCheckMsg" class="muted"></p>
+      <p id="integrationChecklistMsg" class="muted"></p>
+    </section>
+
+    <section class="card hidden" id="settingsCard">
+      <h2>Основные настройки</h2>
+      <label>Длительность слота</label>
+      <select id="slotDuration">
+        <option value="30">30 минут</option>
+        <option value="45">45 минут</option>
+        <option value="60">60 минут</option>
+      </select>
+      <div class="row">
+        <div>
+          <label>Горизонт записи (дней)</label>
+          <input id="horizonDays" type="number" min="1" max="30" value="14" />
+        </div>
+        <div>
+          <label>Cutoff отмены (часы)</label>
+          <input id="cutoffHours" type="number" min="0" max="48" value="2" />
+        </div>
+      </div>
+      <label>Таймзона</label>
+      <input id="timezone" value="Europe/Moscow" />
+      <button id="saveSettingsBtn">Сохранить настройки</button>
+      <p id="settingsMsg"></p>
+    </section>
+
+    <section class="card hidden" id="rulesCard">
+      <h2>Рабочие правила (коридоры)</h2>
+      <p class="muted">Настройте дни недели и рабочие часы</p>
+      <div id="weeklyRules"></div>
+      <button id="saveRulesBtn">Сохранить правила</button>
+      <p id="rulesMsg"></p>
+    </section>
+
+    <section class="card hidden" id="exceptionsCard">
+      <h2>Исключения по датам</h2>
+      <p class="muted">Формат строки: YYYY-MM-DD,isClosed,customStartMinute,customEndMinute</p>
+      <label>Список исключений (по одному на строку)</label>
+      <textarea id="exceptionsText" style="width:100%;min-height:120px;background:#1f2937;color:#f9fafb;border:1px solid #374151;border-radius:12px;padding:10px;"></textarea>
+      <button id="saveExceptionsBtn">Сохранить исключения</button>
+      <p id="exceptionsMsg"></p>
+    </section>
+
+    <section class="card hidden" id="appointmentsCard">
+      <h2>Записи на день</h2>
+      <label>Дата</label>
+      <input id="appointmentsDate" type="date" />
+      <button id="loadAppointmentsBtn">Загрузить</button>
+      <p id="appointmentsMsg"></p>
+      <div id="appointmentsList"></div>
+    </section>
+  </main>
+  <script src="/assets/admin-app.js"></script>
+</body>
+</html>

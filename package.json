@@ -1,0 +1,41 @@
+{
+  "name": "beautime",
+  "version": "1.0.0",
+  "description": "Unified booking service for barber (web + telegram)",
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "tsx src/server.ts",
+    "dev:worker": "tsx src/worker.ts",
+    "migrate": "tsx src/scripts/migrate.ts",
+    "test:e2e:race": "tsx src/scripts/e2e-concurrency.ts",
+    "test:e2e:idempotency": "tsx src/scripts/e2e-idempotency.ts",
+    "test:e2e:cancel-release": "tsx src/scripts/e2e-cancel-release.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "start:api": "node dist/server.js",
+    "start:worker": "node dist/worker.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/jsonwebtoken": "^9.0.10",
+    "@types/node": "^25.6.0",
+    "@types/pg": "^8.20.0",
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "dayjs": "^1.11.20",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "nanoid": "^5.1.9",
+    "pg": "^8.20.0",
+    "telegraf": "^4.16.3",
+    "zod": "^4.3.6"
+  }
+}

@@ -1,0 +1,97 @@
+:root {
+  --bg: #0f172a;
+  --surface: #111827;
+  --surface-alt: #1f2937;
+  --text-primary: #f9fafb;
+  --text-secondary: #d1d5db;
+  --primary: #22c55e;
+  --primary-hover: #16a34a;
+  --danger: #ef4444;
+  --border: #374151;
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: Inter, system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text-primary);
+}
+
+.container {
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 16px;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 16px;
+  margin-bottom: 12px;
+}
+
+h1 { font-size: 24px; margin: 0 0 8px; }
+h2 { font-size: 18px; margin: 0 0 12px; }
+.muted { color: var(--text-secondary); font-size: 14px; }
+
+label { display: block; font-size: 14px; margin: 8px 0 6px; color: var(--text-secondary); }
+input, select {
+  width: 100%;
+  min-height: 48px;
+  background: var(--surface-alt);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 10px 12px;
+}
+
+button {
+  width: 100%;
+  min-height: 48px;
+  border: none;
+  border-radius: 12px;
+  background: var(--primary);
+  color: #06210f;
+  font-weight: 700;
+  margin-top: 12px;
+}
+button:hover { background: var(--primary-hover); cursor: pointer; }
+button.secondary {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+}
+
+.grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; }
+.slot {
+  min-height: 52px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--surface-alt);
+  color: var(--text-primary);
+  font-weight: 600;
+}
+.slot.selected { outline: 2px solid var(--primary); }
+
+.row { display: flex; gap: 8px; }
+.row > * { flex: 1; }
+.day-row {
+  display: grid;
+  grid-template-columns: 1.1fr 1fr 1fr auto;
+  gap: 8px;
+  align-items: end;
+  margin-bottom: 8px;
+}
+.checkbox-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 48px;
+}
+
+.ok { color: var(--primary); font-size: 14px; }
+.err { color: var(--danger); font-size: 14px; }
+
+.hidden { display: none; }

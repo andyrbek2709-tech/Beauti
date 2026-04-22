@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Beautime Owner</title>
+  <link rel="stylesheet" href="/assets/styles.css" />
+</head>
+<body>
+  <main class="container">
+    <section class="card">
+      <h2>Статистика платформы</h2>
+      <button id="refreshStatsBtn" class="secondary">Обновить статистику</button>
+      <p id="statsMsg" class="muted"></p>
+      <div id="statsGrid" class="grid"></div>
+    </section>
+
+    <section class="card">
+      <h2>Технический статус</h2>
+      <button id="refreshHealthBtn" class="secondary">Проверить систему</button>
+      <p id="healthMsg" class="muted"></p>
+      <div id="healthGrid" class="grid"></div>
+    </section>
+
+    <section class="card">
+      <h1>Owner Panel</h1>
+      <p class="muted">Генерация инвайтов для подключения салонов</p>
+      <label>Platform Key</label>
+      <input id="platformKey" type="password" placeholder="x-platform-key" />
+      <div class="row">
+        <div>
+          <label>TTL (часы)</label>
+          <input id="ttlHours" type="number" min="1" max="168" value="72" />
+        </div>
+        <div>
+          <label>Заметка (опц.)</label>
+          <input id="note" placeholder="Салон на тест" />
+        </div>
+      </div>
+      <button id="createInviteBtn">Создать инвайт</button>
+      <p id="ownerMsg"></p>
+    </section>
+
+    <section class="card">
+      <h2>Результат</h2>
+      <label>Invite Token</label>
+      <input id="inviteTokenOut" readonly />
+      <label>Invite URL</label>
+      <input id="inviteUrlOut" readonly />
+      <button id="copyInviteBtn" class="secondary">Скопировать ссылку</button>
+    </section>
+
+    <section class="card">
+      <h2>Последние инвайты</h2>
+      <div class="row">
+        <div>
+          <label>Фильтр статуса</label>
+          <select id="statusFilter">
+            <option value="all">Все</option>
+            <option value="active">Только активные</option>
+            <option value="used">Только использованные</option>
+            <option value="expired">Только истекшие</option>
+            <option value="revoked">Только отозванные</option>
+          </select>
+        </div>
+        <div>
+          <label>Поиск (token/note)</label>
+          <input id="searchFilter" placeholder="Введите token или note" />
+        </div>
+      </div>
+      <button id="refreshInvitesBtn" class="secondary">Обновить список</button>
+      <p id="invitesMsg" class="muted"></p>
+      <div id="invitesList"></div>
+    </section>
+  </main>
+  <script src="/assets/owner-app.js"></script>
+</body>
+</html>
