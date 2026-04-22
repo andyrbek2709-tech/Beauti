@@ -25,6 +25,18 @@
       <input id="loginPassword" type="password" />
       <button id="loginBtn">Войти</button>
       <p id="authMsg"></p>
+      <hr style="border-color:#374151; margin:14px 0;" />
+      <h3 style="margin:0 0 8px 0;">Забыли пароль?</h3>
+      <p class="muted">Восстановление через ваш Telegram-бот</p>
+      <label>Telegram Bot Token</label>
+      <input id="resetBotToken" />
+      <button id="sendResetCodeBtn" class="secondary">Получить код в Telegram</button>
+      <label>Код из Telegram</label>
+      <input id="resetCode" placeholder="6 цифр" />
+      <label>Новый пароль</label>
+      <input id="resetNewPassword" type="password" />
+      <button id="applyResetBtn">Сменить пароль</button>
+      <p id="resetMsg"></p>
     </section>
 
     <section class="card hidden" id="registerCard">

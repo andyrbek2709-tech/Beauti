@@ -27,6 +27,7 @@
       <p class="muted">Генерация инвайтов для подключения салонов</p>
       <label>Platform Key</label>
       <input id="platformKey" type="password" placeholder="x-platform-key" />
+      <p class="muted">Ключ запоминается в браузере. После первого ввода список салонов грузится автоматически.</p>
       <div class="row">
         <div>
           <label>TTL (часы)</label>
@@ -71,6 +72,13 @@
       <button id="refreshInvitesBtn" class="secondary">Обновить список</button>
       <p id="invitesMsg" class="muted"></p>
       <div id="invitesList"></div>
+    </section>
+
+    <section class="card">
+      <h2>Салоны (управление)</h2>
+      <button id="refreshSalonsBtn" class="secondary">Обновить список салонов</button>
+      <p id="salonsMsg" class="muted"></p>
+      <div id="salonsList"></div>
     </section>
   </main>
   <script src="/assets/owner-app.js"></script>

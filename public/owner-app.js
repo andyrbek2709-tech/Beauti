@@ -5,6 +5,9 @@ const statsMsg = document.getElementById("statsMsg");
 const statsGrid = document.getElementById("statsGrid");
 const healthMsg = document.getElementById("healthMsg");
 const healthGrid = document.getElementById("healthGrid");
+const salonsMsg = document.getElementById("salonsMsg");
+const salonsList = document.getElementById("salonsList");
+const platformKeyInput = document.getElementById("platformKey");
 
 function statusLabel(status) {
   if (status === "used") return "Использован";
@@ -91,6 +94,69 @@ async function loadInvites() {
   invitesMsg.className = "ok";
 }
 
+async function deleteSalon(salonId, salonName) {
+  const platformKey = document.getElementById("platformKey").value.trim();
+  if (!platformKey) {
+    salonsMsg.textContent = "Введите platform key";
+    salonsMsg.className = "err";
+    return;
+  }
+  const ok = window.confirm(`Удалить салон "${salonName}"? Это удалит все связанные данные.`);
+  if (!ok) return;
+  const resp = await fetch(`/platform/salons/${encodeURIComponent(salonId)}`, {
+    method: "DELETE",
+    headers: { "x-platform-key": platformKey }
+  });
+  const data = await resp.json();
+  if (!resp.ok) {
+    salonsMsg.textContent = data.message || "Ошибка удаления салона";
+    salonsMsg.className = "err";
+    return;
+  }
+  salonsMsg.textContent = `Салон удален: ${data.deleted?.name || salonName}`;
+  salonsMsg.className = "ok";
+  await loadSalons();
+}
+
+async function loadSalons() {
+  const platformKey = platformKeyInput.value.trim();
+  if (!platformKey) {
+    salonsMsg.textContent = "Введите platform key один раз, далее список будет открываться автоматически.";
+    salonsMsg.className = "err";
+    return;
+  }
+  localStorage.setItem("ownerPlatformKey", platformKey);
+  const resp = await fetch("/platform/salons", { headers: { "x-platform-key": platformKey } });
+  const data = await resp.json();
+  if (!resp.ok) {
+    salonsMsg.textContent = data.message || "Ошибка загрузки салонов";
+    salonsMsg.className = "err";
+    return;
+  }
+  const items = data.items || [];
+
+  salonsList.innerHTML = "";
+  for (const s of items) {
+    const card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML = `
+      <div><strong>${s.name || "(без названия)"}</strong></div>
+      <div class="muted">id: ${s.id}</div>
+      <div class="muted">slug: ${s.slug || "-"}</div>
+      <div class="muted">admin email: ${s.admin_email || "-"}</div>
+      <div class="muted">subscription: ${s.subscription_status || "-"}</div>
+    `;
+    const delBtn = document.createElement("button");
+    delBtn.className = "secondary";
+    delBtn.textContent = "Удалить салон";
+    delBtn.onclick = () => deleteSalon(s.id, s.name || s.id);
+    card.appendChild(delBtn);
+    salonsList.appendChild(card);
+  }
+  salonsMsg.textContent = `Салонов зарегистрировано: ${items.length}`;
+  salonsMsg.className = "ok";
+}
+
 function metricCard(title, value) {
   return `<div class="card"><div class="muted">${title}</div><div><strong>${value}</strong></div></div>`;
 }
@@ -149,7 +215,7 @@ async function loadHealth() {
 }
 
 document.getElementById("createInviteBtn").onclick = async () => {
-  const platformKey = document.getElementById("platformKey").value.trim();
+  const platformKey = platformKeyInput.value.trim();
   const ttlHours = Number(document.getElementById("ttlHours").value);
   const note = document.getElementById("note").value.trim();
   if (!platformKey) {
@@ -157,6 +223,7 @@ document.getElementById("createInviteBtn").onclick = async () => {
     msg.className = "err";
     return;
   }
+  localStorage.setItem("ownerPlatformKey", platformKey);
   const resp = await fetch("/platform/invites", {
     method: "POST",
     headers: {
@@ -200,6 +267,9 @@ document.getElementById("refreshStatsBtn").onclick = async () => {
 document.getElementById("refreshHealthBtn").onclick = async () => {
   await loadHealth();
 };
+document.getElementById("refreshSalonsBtn").onclick = async () => {
+  await loadSalons();
+};
 
 document.getElementById("statusFilter").onchange = () => {
   loadInvites().catch(() => {});
@@ -207,3 +277,15 @@ document.getElementById("statusFilter").onchange = () => {
 document.getElementById("searchFilter").oninput = () => {
   loadInvites().catch(() => {});
 };
+platformKeyInput.addEventListener("change", () => {
+  const key = platformKeyInput.value.trim();
+  if (key) localStorage.setItem("ownerPlatformKey", key);
+  loadSalons().catch(() => {});
+});
+
+const savedPlatformKey = localStorage.getItem("ownerPlatformKey") || "";
+if (savedPlatformKey) {
+  platformKeyInput.value = savedPlatformKey;
+}
+
+loadSalons().catch(() => {});

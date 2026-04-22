@@ -10,6 +10,7 @@ const appointmentsMsg = document.getElementById("appointmentsMsg");
 const inviteMsg = document.getElementById("inviteMsg");
 const integrationCheckMsg = document.getElementById("integrationCheckMsg");
 const integrationChecklistMsg = document.getElementById("integrationChecklistMsg");
+const resetMsg = document.getElementById("resetMsg");
 const weeklyRulesEl = document.getElementById("weeklyRules");
 const weekdayNames = ["Воскресенье", "Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота"];
 
@@ -124,6 +125,47 @@ document.getElementById("registerBtn").onclick = async () => {
   registerMsg.textContent = `Салон создан. salonId: ${data.salonId}`;
   registerMsg.className = "ok";
   showAdminPanels();
+};
+
+document.getElementById("sendResetCodeBtn").onclick = async () => {
+  const email = document.getElementById("loginEmail").value.trim();
+  const telegramBotToken = document.getElementById("resetBotToken").value.trim();
+  const resp = await fetch("/auth/password-reset/telegram/start", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email, telegramBotToken })
+  });
+  const data = await resp.json();
+  if (!resp.ok) {
+    resetMsg.textContent = data.message || "Не удалось отправить код";
+    resetMsg.className = "err";
+    return;
+  }
+  resetMsg.textContent = "Код отправлен в Telegram. Введите его ниже и задайте новый пароль.";
+  resetMsg.className = "ok";
+};
+
+document.getElementById("applyResetBtn").onclick = async () => {
+  const email = document.getElementById("loginEmail").value.trim();
+  const telegramBotToken = document.getElementById("resetBotToken").value.trim();
+  const code = document.getElementById("resetCode").value.trim();
+  const newPassword = document.getElementById("resetNewPassword").value.trim();
+  const resp = await fetch("/auth/password-reset/telegram/confirm", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ email, telegramBotToken, code, newPassword })
+  });
+  const data = await resp.json();
+  if (!resp.ok) {
+    resetMsg.textContent = data.message || "Не удалось сменить пароль";
+    resetMsg.className = "err";
+    return;
+  }
+  resetMsg.textContent = "Пароль обновлен. Теперь войдите с новым паролем.";
+  resetMsg.className = "ok";
+  document.getElementById("loginPassword").value = "";
+  document.getElementById("resetCode").value = "";
+  document.getElementById("resetNewPassword").value = "";
 };
 
 document.getElementById("acceptInviteBtn").onclick = async () => {
@@ -442,7 +484,8 @@ async function runTelegramAutoSetup(telegramBotToken, telegramUserId, silent) {
   });
   const data = await resp.json();
   if (!resp.ok) {
-    integrationMsg.textContent = data.message || "Ошибка автонастройки";
+    const details = data.details ? ` Детали: ${data.details}` : "";
+    integrationMsg.textContent = (data.message || "Ошибка автонастройки") + details;
     integrationMsg.className = "err";
     return false;
   }

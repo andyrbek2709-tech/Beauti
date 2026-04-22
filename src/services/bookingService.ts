@@ -138,6 +138,28 @@ export async function getAvailabilityForSalon(salonId: string, from: string, to:
       [salonId, fromDate.utc().toDate(), boundedTo.utc().toDate()]
     )
   );
+  const pausesRes = await withTx((client) =>
+    client.query(
+      `SELECT start_date::text, end_date::text
+       FROM booking_pauses
+       WHERE salon_id = $1
+         AND is_active = true
+         AND start_date <= $3::date
+         AND end_date >= $2::date`,
+      [salonId, fromDate.format("YYYY-MM-DD"), boundedTo.format("YYYY-MM-DD")]
+    )
+  );
+  const patternsRes = await withTx((client) =>
+    client.query(
+      `SELECT period_start::text, period_end::text, pattern_type, anchor_date::text
+       FROM salon_work_patterns
+       WHERE salon_id = $1
+         AND is_active = true
+         AND period_start <= $3::date
+         AND period_end >= $2::date`,
+      [salonId, fromDate.format("YYYY-MM-DD"), boundedTo.format("YYYY-MM-DD")]
+    )
+  );
 
   const rulesByWeekday = new Map<number, { startMinute: number; endMinute: number }[]>();
   for (const r of rulesRes.rows) {
@@ -156,11 +178,46 @@ export async function getAvailabilityForSalon(salonId: string, from: string, to:
   }
 
   const occupied = new Set(apptRes.rows.map((r) => dayjs(r.start_at).toISOString()));
+  const pausedDates = new Set<string>();
+  for (const p of pausesRes.rows) {
+    let d = dayjs(String(p.start_date));
+    const end = dayjs(String(p.end_date));
+    while (d.isBefore(end.add(1, "day"), "day")) {
+      pausedDates.add(d.format("YYYY-MM-DD"));
+      d = d.add(1, "day");
+    }
+  }
   const slots: SlotView[] = [];
   let cursor = fromDate.tz(zone).startOf("day");
   while (cursor.isBefore(boundedTo.tz(zone).endOf("day"))) {
     const weekday = cursor.day();
     const dateKey = cursor.format("YYYY-MM-DD");
+    if (pausedDates.has(dateKey)) {
+      cursor = cursor.add(1, "day");
+      continue;
+    }
+    const dayPattern = patternsRes.rows.find((p) => {
+      return dateKey >= String(p.period_start) && dateKey <= String(p.period_end);
+    });
+    if (dayPattern) {
+      const dayNum = Number(dateKey.slice(-2));
+      if (dayPattern.pattern_type === "even_dates" && dayNum % 2 !== 0) {
+        cursor = cursor.add(1, "day");
+        continue;
+      }
+      if (dayPattern.pattern_type === "odd_dates" && dayNum % 2 === 0) {
+        cursor = cursor.add(1, "day");
+        continue;
+      }
+      if (dayPattern.pattern_type === "every_other_day") {
+        const anchor = dayjs(String(dayPattern.anchor_date || dayPattern.period_start));
+        const diff = cursor.startOf("day").diff(anchor.startOf("day"), "day");
+        if (diff % 2 !== 0) {
+          cursor = cursor.add(1, "day");
+          continue;
+        }
+      }
+    }
     const exception = exByDate.get(dateKey);
     let windows = rulesByWeekday.get(weekday) ?? [];
     if (exception?.isClosed) {
@@ -303,6 +360,7 @@ export async function bookAppointmentForSalon(params: {
   salonId: string;
   clientName: string;
   clientPhone: string;
+  clientTelegramUserId?: string;
   source: BookingSource;
   requestId: string;
   slotStartAt: string;
@@ -323,14 +381,55 @@ export async function bookAppointmentForSalon(params: {
     if (slotStart.isAfter(horizonEnd) || slotStart.isBefore(dayjs())) {
       throw new Error("slot outside allowed range");
     }
+    const pauseRes = await client.query(
+      `SELECT id
+       FROM booking_pauses
+       WHERE salon_id = $1
+         AND is_active = true
+         AND $2::date BETWEEN start_date AND end_date
+       LIMIT 1`,
+      [params.salonId, slotStart.format("YYYY-MM-DD")]
+    );
+    if (pauseRes.rowCount) {
+      throw new Error("booking paused for this date");
+    }
+    const patternRes = await client.query(
+      `SELECT period_start::text, period_end::text, pattern_type, anchor_date::text
+       FROM salon_work_patterns
+       WHERE salon_id = $1
+         AND is_active = true
+         AND $2::date BETWEEN period_start AND period_end
+       LIMIT 1`,
+      [params.salonId, slotStart.format("YYYY-MM-DD")]
+    );
+    if (patternRes.rowCount) {
+      const p = patternRes.rows[0];
+      const dayNum = Number(slotStart.format("DD"));
+      if (p.pattern_type === "even_dates" && dayNum % 2 !== 0) throw new Error("date disabled by work pattern");
+      if (p.pattern_type === "odd_dates" && dayNum % 2 === 0) throw new Error("date disabled by work pattern");
+      if (p.pattern_type === "every_other_day") {
+        const anchor = dayjs(String(p.anchor_date || p.period_start));
+        const diff = slotStart.startOf("day").diff(anchor.startOf("day"), "day");
+        if (diff % 2 !== 0) throw new Error("date disabled by work pattern");
+      }
+    }
 
     const appointmentId = crypto.randomUUID();
     try {
       await client.query(
         `INSERT INTO appointments
-         (id, salon_id, client_name, client_phone, source, status, start_at, end_at)
-         VALUES ($1,$2,$3,$4,$5,'booked',$6,$7)`,
-        [appointmentId, params.salonId, params.clientName, params.clientPhone, params.source, slotStart.toDate(), slotEnd.toDate()]
+         (id, salon_id, client_name, client_phone, client_telegram_user_id, source, status, start_at, end_at)
+         VALUES ($1,$2,$3,$4,$5,$6,'booked',$7,$8)`,
+        [
+          appointmentId,
+          params.salonId,
+          params.clientName,
+          params.clientPhone,
+          params.clientTelegramUserId ?? null,
+          params.source,
+          slotStart.toDate(),
+          slotEnd.toDate()
+        ]
       );
     } catch (error: any) {
       if (error?.code === "23505") throw new ConflictError("slot_unavailable");

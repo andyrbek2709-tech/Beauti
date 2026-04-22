@@ -1,6 +1,7 @@
 import express from "express";
 import crypto from "node:crypto";
 import path from "node:path";
+import dayjs from "dayjs";
 import { z } from "zod";
 import { hashPassword, signAdminToken, verifyAdminToken, verifyPassword } from "./auth";
 import { assertConfig, config } from "./config";
@@ -13,9 +14,11 @@ import {
   getAvailabilityForSalon,
   getBookingForSalon
 } from "./services/bookingService";
+import { scanAndNotify } from "./worker";
 
 assertConfig();
 const app = express();
+app.set("trust proxy", true);
 app.use(express.json());
 app.use("/assets", express.static(path.join(process.cwd(), "public")));
 
@@ -113,6 +116,14 @@ app.get("/booking/:id", async (req, res) => {
 });
 
 type AuthedRequest = express.Request & { admin?: { adminId: string; salonId: string; email: string } };
+function getPublicBaseUrl(req: express.Request): string {
+  const forwardedProtoRaw = String(req.header("x-forwarded-proto") ?? "");
+  const forwardedProto = forwardedProtoRaw.split(",")[0]?.trim();
+  const protocol = forwardedProto || req.protocol || "https";
+  const host = req.get("host") || "";
+  return `${protocol}://${host}`;
+}
+
 function adminOnly(req: AuthedRequest, res: express.Response, next: express.NextFunction): void {
   const auth = req.header("authorization");
   if (!auth?.startsWith("Bearer ")) return void res.status(401).json({ message: "missing token" });
@@ -292,6 +303,35 @@ app.get("/platform/stats", platformOwnerOnly, async (_req, res) => {
   });
 });
 
+app.get("/platform/salons", platformOwnerOnly, async (_req, res) => {
+  const rows = await pool.query(
+    `SELECT
+       s.id,
+       s.name,
+       s.slug,
+       s.created_at,
+       a.email as admin_email,
+       sub.status as subscription_status
+     FROM salons s
+     LEFT JOIN LATERAL (
+       SELECT email FROM admins WHERE salon_id = s.id ORDER BY created_at ASC LIMIT 1
+     ) a ON true
+     LEFT JOIN subscriptions sub ON sub.salon_id = s.id
+     ORDER BY s.created_at DESC
+     LIMIT 200`
+  );
+  res.json({ items: rows.rows });
+});
+
+app.delete("/platform/salons/:salonId", platformOwnerOnly, async (req, res) => {
+  const salonId = req.params.salonId;
+  const result = await pool.query("DELETE FROM salons WHERE id = $1 RETURNING id, name", [salonId]);
+  if (!result.rowCount) {
+    return res.status(404).json({ message: "salon not found" });
+  }
+  res.json({ ok: true, deleted: result.rows[0] });
+});
+
 const acceptInviteBody = z.object({
   inviteToken: z.string().uuid(),
   salonName: z.string().min(2),
@@ -363,6 +403,11 @@ app.post("/auth/accept-invite", async (req, res) => {
   }
 
   const token = signAdminToken({ adminId, salonId, email: parsed.data.email.toLowerCase() });
+  await sendTelegramMessage(
+    parsed.data.telegramBotToken,
+    Number(parsed.data.telegramUserId),
+    `Регистрация салона "${parsed.data.salonName}" завершена.\nEmail: ${parsed.data.email.toLowerCase()}\nТеперь нажмите "Подключить бота автоматически", чтобы включить уведомления и прием записей.`
+  );
   res.status(201).json({ token, salonId, adminId, salonSlug });
 });
 
@@ -383,6 +428,103 @@ app.post("/auth/login", async (req, res) => {
     email: String(admin.email)
   });
   res.json({ token, salonId: admin.salon_id, adminId: admin.id });
+});
+
+const passwordResetStartBody = z.object({
+  email: z.string().email(),
+  telegramBotToken: z.string().min(10)
+});
+
+app.post("/auth/password-reset/telegram/start", async (req, res) => {
+  const parsed = passwordResetStartBody.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json(parsed.error.flatten());
+
+  const pair = await pool.query(
+    `SELECT a.id as admin_id, ti.telegram_user_id
+     FROM admins a
+     JOIN telegram_integrations ti ON ti.salon_id = a.salon_id
+     WHERE a.email = $1 AND ti.bot_token = $2
+     LIMIT 1`,
+    [parsed.data.email.toLowerCase(), parsed.data.telegramBotToken]
+  );
+  if (!pair.rowCount) {
+    return res.status(400).json({ message: "email и telegram token не совпадают" });
+  }
+
+  const adminId = String(pair.rows[0].admin_id);
+  const telegramUserId = Number(pair.rows[0].telegram_user_id);
+  if (!Number.isFinite(telegramUserId)) {
+    return res.status(400).json({ message: "telegram user id не настроен" });
+  }
+
+  const code = String(Math.floor(100000 + Math.random() * 900000));
+  await withTx(async (client) => {
+    await client.query("DELETE FROM password_reset_codes WHERE admin_id = $1 AND used_at IS NULL", [adminId]);
+    await client.query(
+      `INSERT INTO password_reset_codes (id, admin_id, reset_code, expires_at)
+       VALUES ($1,$2,$3, now() + interval '15 minutes')`,
+      [crypto.randomUUID(), adminId, code]
+    );
+  });
+
+  await sendTelegramMessage(
+    parsed.data.telegramBotToken,
+    telegramUserId,
+    `Код для восстановления пароля Beautime: ${code}\nКод действует 15 минут.`
+  );
+  res.json({ ok: true, message: "Код отправлен в Telegram" });
+});
+
+const passwordResetConfirmBody = z.object({
+  email: z.string().email(),
+  telegramBotToken: z.string().min(10),
+  code: z.string().regex(/^\d{6}$/),
+  newPassword: z.string().min(8)
+});
+
+app.post("/auth/password-reset/telegram/confirm", async (req, res) => {
+  const parsed = passwordResetConfirmBody.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json(parsed.error.flatten());
+
+  const pair = await pool.query(
+    `SELECT a.id as admin_id
+     FROM admins a
+     JOIN telegram_integrations ti ON ti.salon_id = a.salon_id
+     WHERE a.email = $1 AND ti.bot_token = $2
+     LIMIT 1`,
+    [parsed.data.email.toLowerCase(), parsed.data.telegramBotToken]
+  );
+  if (!pair.rowCount) {
+    return res.status(400).json({ message: "email и telegram token не совпадают" });
+  }
+
+  const adminId = String(pair.rows[0].admin_id);
+  const newPasswordHash = await hashPassword(parsed.data.newPassword);
+  const updated = await withTx(async (client) => {
+    const codeRow = await client.query(
+      `SELECT id
+       FROM password_reset_codes
+       WHERE admin_id = $1
+         AND reset_code = $2
+         AND used_at IS NULL
+         AND expires_at > now()
+       ORDER BY created_at DESC
+       LIMIT 1
+       FOR UPDATE`,
+      [adminId, parsed.data.code]
+    );
+    if (!codeRow.rowCount) return false;
+
+    const codeId = String(codeRow.rows[0].id);
+    await client.query("UPDATE admins SET password_hash = $1 WHERE id = $2", [newPasswordHash, adminId]);
+    await client.query("UPDATE password_reset_codes SET used_at = now() WHERE id = $1", [codeId]);
+    return true;
+  });
+
+  if (!updated) {
+    return res.status(400).json({ message: "код неверный или истек" });
+  }
+  res.json({ ok: true, message: "Пароль обновлен" });
 });
 
 const integrationBody = z.object({
@@ -423,7 +565,7 @@ app.post("/admin/integration/telegram/auto-setup", adminOnly, async (req: Authed
 
   const webhookSecret = crypto.randomUUID();
   const webhookPath = `/telegram/webhook/${req.admin!.salonId}`;
-  const publicBaseUrl = req.protocol + "://" + req.get("host");
+  const publicBaseUrl = getPublicBaseUrl(req);
   const webhookUrl = `${publicBaseUrl}${webhookPath}`;
 
   try {
@@ -501,7 +643,7 @@ app.get("/admin/integration/telegram/check", adminOnly, async (req: AuthedReques
       return res.status(400).json({ message: "Не удалось получить webhook info" });
     }
     const expectedPath = `/telegram/webhook/${req.admin!.salonId}`;
-    const expectedUrl = req.protocol + "://" + req.get("host") + expectedPath;
+    const expectedUrl = `${getPublicBaseUrl(req)}${expectedPath}`;
     res.json({
       ok: true,
       botUsername: meData.result?.username ?? null,
@@ -574,68 +716,1105 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
 
   const botToken = String(integration.rows[0].bot_token ?? "");
   const adminTelegramUserId = String(integration.rows[0].telegram_user_id ?? "");
+  const salonRes = await pool.query("SELECT name, slug FROM salons WHERE id = $1", [salonId]);
+  const salonName = String(salonRes.rows[0]?.name ?? "Ваш салон");
+  const salonSlug = String(salonRes.rows[0]?.slug ?? "");
+  const baseUrl = getPublicBaseUrl(req);
+  const bookingUrl = `${baseUrl}/?salonId=${encodeURIComponent(salonId)}${salonSlug ? `&salon=${encodeURIComponent(salonSlug)}` : ""}`;
+
+  const settingsRow = await pool.query(
+    "SELECT booking_horizon_days, timezone FROM master_settings WHERE salon_id = $1",
+    [salonId]
+  );
+  const salonTimezone = String(settingsRow.rows[0]?.timezone ?? config.timezone);
+  const horizonDays = Number(settingsRow.rows[0]?.booking_horizon_days ?? 14);
+
+  const renderDateChoices = async (chatId: number) => {
+    const from = new Date().toISOString();
+    const to = new Date(Date.now() + horizonDays * 24 * 60 * 60 * 1000).toISOString();
+    const slots = (await getAvailabilityForSalon(salonId, from, to)).filter((s) => s.available);
+    if (!slots.length) {
+      await sendTelegramMessage(botToken, chatId, "Свободных слотов пока нет.");
+      return;
+    }
+    const dates = new Map<string, string>();
+    for (const slot of slots) {
+      const dateKey = new Intl.DateTimeFormat("en-CA", {
+        timeZone: salonTimezone,
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit"
+      }).format(new Date(slot.startAt));
+      if (!dates.has(dateKey)) {
+        const label = new Intl.DateTimeFormat("ru-RU", {
+          timeZone: salonTimezone,
+          weekday: "short",
+          day: "2-digit",
+          month: "2-digit"
+        }).format(new Date(slot.startAt));
+        dates.set(dateKey, label);
+      }
+    }
+    const buttons = Array.from(dates.entries())
+      .slice(0, 14)
+      .map(([key, label]) => ({ text: label, callback_data: `bk:date:${key}` }));
+    await sendTelegramMessage(botToken, chatId, "Выберите дату:", {
+      reply_markup: { inline_keyboard: chunkButtons(buttons, 2) }
+    });
+  };
+
+  const renderTimeChoices = async (chatId: number, dateKey: string) => {
+    const from = `${dateKey}T00:00:00.000Z`;
+    const to = `${dateKey}T23:59:59.999Z`;
+    const slots = (await getAvailabilityForSalon(salonId, from, to)).filter((s) => s.available);
+    if (!slots.length) {
+      await sendTelegramMessage(botToken, chatId, "На эту дату свободных слотов нет. Выберите другую дату.");
+      await renderDateChoices(chatId);
+      return;
+    }
+    const buttons = slots.slice(0, 24).map((slot) => ({
+      text: new Intl.DateTimeFormat("ru-RU", { timeZone: salonTimezone, hour: "2-digit", minute: "2-digit" }).format(
+        new Date(slot.startAt)
+      ),
+      callback_data: `bk:slot:${new Date(slot.startAt).getTime()}`
+    }));
+    await sendTelegramMessage(botToken, chatId, `Дата ${dateKey}. Выберите время:`, {
+      reply_markup: { inline_keyboard: chunkButtons(buttons, 3) }
+    });
+  };
+
+  const dateKeyByOffset = (offsetDays: number): string =>
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: salonTimezone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit"
+    }).format(new Date(Date.now() + offsetDays * 24 * 60 * 60 * 1000));
+
+  const adminMenuKeyboard = () => ({
+    inline_keyboard: [
+      [
+        { text: "Сегодня", callback_data: "adm:today" },
+        { text: "Завтра", callback_data: "adm:tomorrow" },
+        { text: "Послезавтра", callback_data: "adm:after" }
+      ],
+      [{ text: "Показать 14 дней", callback_data: "adm:days" }],
+      [{ text: "График: чет/нечет/через день", callback_data: "adm:schedule" }],
+      [{ text: "Пауза: выбрать даты", callback_data: "adm:pause:pick:start" }],
+      [{ text: "Возобновить запись", callback_data: "adm:resume" }],
+      [{ text: "Сбросить настройки", callback_data: "adm:reset:start" }],
+      [{ text: "Рассылка клиентам", callback_data: "adm:broadcast:start" }],
+      [{ text: "Статус подключения", callback_data: "adm:status" }, { text: "Ссылка клиентам", callback_data: "adm:link" }]
+    ]
+  });
+
+  const getMonthRange = (monthMode: "current" | "next"): { start: string; end: string; label: string } => {
+    const base = dayjs().tz(salonTimezone).startOf("month").add(monthMode === "next" ? 1 : 0, "month");
+    return {
+      start: base.format("YYYY-MM-DD"),
+      end: base.endOf("month").format("YYYY-MM-DD"),
+      label: base.format("MM.YYYY")
+    };
+  };
+
+  const saveScheduleActionState = async (
+    adminTelegramUserId: string,
+    payload: Record<string, unknown>
+  ): Promise<void> => {
+    await pool.query(
+      `INSERT INTO telegram_admin_actions (salon_id, admin_telegram_user_id, action_type, payload_json, updated_at)
+       VALUES ($1,$2,'schedule_setup',$3,now())
+       ON CONFLICT (salon_id, admin_telegram_user_id)
+       DO UPDATE SET action_type='schedule_setup', payload_json=EXCLUDED.payload_json, updated_at=now()`,
+      [salonId, adminTelegramUserId, JSON.stringify(payload)]
+    );
+  };
+
+  const showScheduleMonthPicker = async (chatId: number) => {
+    await sendTelegramMessage(botToken, chatId, "Выберите месяц для шаблона графика:", {
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: "Этот месяц", callback_data: "adm:sch:month:current" },
+            { text: "Следующий месяц", callback_data: "adm:sch:month:next" }
+          ],
+          [{ text: "Назад к меню", callback_data: "adm:menu" }]
+        ]
+      }
+    });
+  };
+
+  const pauseDateButtons = (prefix: "adm:pause:start:" | "adm:pause:end:", fromOffsetDays = 0, count = 21) => {
+    const items = Array.from({ length: count }, (_, i) => {
+      const offset = fromOffsetDays + i;
+      const key = dateKeyByOffset(offset);
+      const label = new Intl.DateTimeFormat("ru-RU", {
+        timeZone: salonTimezone,
+        weekday: "short",
+        day: "2-digit",
+        month: "2-digit"
+      }).format(new Date(`${key}T12:00:00.000Z`));
+      return { text: label, callback_data: `${prefix}${key}` };
+    });
+    return chunkButtons(items, 2);
+  };
+
+  const countBookingsInRange = async (start: string, end: string): Promise<number> => {
+    const c = await pool.query(
+      `SELECT count(*)::int as cnt
+       FROM appointments
+       WHERE salon_id = $1
+         AND status = 'booked'
+         AND start_at >= $2::timestamptz
+         AND start_at <= $3::timestamptz`,
+      [salonId, `${start}T00:00:00.000Z`, `${end}T23:59:59.999Z`]
+    );
+    return Number(c.rows[0]?.cnt ?? 0);
+  };
+
+  const setPauseOnly = async (start: string, end: string) => {
+    await pool.query("UPDATE booking_pauses SET is_active = false, updated_at = now() WHERE salon_id = $1 AND is_active = true", [salonId]);
+    await pool.query(
+      `INSERT INTO booking_pauses (salon_id, start_date, end_date, reason, is_active, updated_at)
+       VALUES ($1,$2::date,$3::date,$4,true,now())`,
+      [salonId, start, end, "admin_button_pause_range"]
+    );
+  };
+
+  const cancelBookingsInRangeWithMessage = async (start: string, end: string, messageForClients: string): Promise<number> => {
+    const affected = await pool.query(
+      `SELECT id, client_telegram_user_id, client_name, start_at
+       FROM appointments
+       WHERE salon_id = $1
+         AND status = 'booked'
+         AND start_at >= $2::timestamptz
+         AND start_at <= $3::timestamptz
+       ORDER BY start_at ASC`,
+      [salonId, `${start}T00:00:00.000Z`, `${end}T23:59:59.999Z`]
+    );
+    let cancelled = 0;
+    for (const appt of affected.rows) {
+      try {
+        await cancelAppointmentForSalon({
+          salonId,
+          appointmentId: String(appt.id),
+          requestId: `pause-cancel-${salonId}-${appt.id}`,
+          actor: "admin"
+        });
+        cancelled += 1;
+        const clientTelegramId = Number(appt.client_telegram_user_id);
+        if (Number.isFinite(clientTelegramId)) {
+          const when = new Intl.DateTimeFormat("ru-RU", {
+            timeZone: salonTimezone,
+            weekday: "short",
+            day: "2-digit",
+            month: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit"
+          }).format(new Date(String(appt.start_at)));
+          await sendTelegramMessage(
+            botToken,
+            clientTelegramId,
+            `Ваша запись на ${when} отменена.\n${messageForClients}\nНапишите "записаться", чтобы выбрать новое время.`
+          );
+        }
+      } catch {
+        // Continue cancelling the rest.
+      }
+    }
+    return cancelled;
+  };
+
+  const renderAdminDay = async (chatId: number, dateKey: string) => {
+    const from = `${dateKey}T00:00:00.000Z`;
+    const to = `${dateKey}T23:59:59.999Z`;
+    const [slots, apptRes] = await Promise.all([
+      getAvailabilityForSalon(salonId, from, to),
+      pool.query(
+        `SELECT id, client_name, client_phone, start_at
+         FROM appointments
+         WHERE salon_id = $1
+           AND status = 'booked'
+           AND start_at >= $2::timestamptz
+           AND start_at <= $3::timestamptz
+         ORDER BY start_at ASC`,
+        [salonId, from, to]
+      )
+    ]);
+    const bookedByStart = new Map<string, any>();
+    for (const a of apptRes.rows) bookedByStart.set(new Date(a.start_at).toISOString(), a);
+
+    const buttons: Array<{ text: string; callback_data: string }> = [];
+    for (const slot of slots) {
+      const time = new Intl.DateTimeFormat("ru-RU", { timeZone: salonTimezone, hour: "2-digit", minute: "2-digit" }).format(
+        new Date(slot.startAt)
+      );
+      const booked = bookedByStart.get(slot.startAt);
+      if (booked) {
+        buttons.push({ text: `🟩 ${time}`, callback_data: `adm:appt:${booked.id}` });
+      } else {
+        buttons.push({ text: `⬜ ${time}`, callback_data: "adm:none" });
+      }
+    }
+    if (!buttons.length) {
+      await sendTelegramMessage(botToken, chatId, `На ${dateKey} рабочие слоты не настроены.`, {
+        reply_markup: { inline_keyboard: [[{ text: "Назад к меню", callback_data: "adm:menu" }]] }
+      });
+      return;
+    }
+    const keyboardRows = chunkButtons(buttons.slice(0, 30), 3);
+    keyboardRows.push([{ text: "Назад к меню", callback_data: "adm:menu" }]);
+    await sendTelegramMessage(
+      botToken,
+      chatId,
+      `Расписание на ${dateKey}.\n🟩 занято, ⬜ свободно.\nНажмите на занятое время, чтобы открыть клиента.`,
+      {
+      reply_markup: { inline_keyboard: keyboardRows }
+      }
+    );
+  };
+
+  const renderAdmin14Days = async (chatId: number) => {
+    const days = Array.from({ length: 14 }, (_, i) => dateKeyByOffset(i));
+    const buttons: Array<{ text: string; callback_data: string }> = [];
+    for (const d of days) {
+      const countRes = await pool.query(
+        `SELECT count(*)::int as cnt
+         FROM appointments
+         WHERE salon_id = $1
+           AND status = 'booked'
+           AND start_at >= $2::timestamptz
+           AND start_at <= $3::timestamptz`,
+        [salonId, `${d}T00:00:00.000Z`, `${d}T23:59:59.999Z`]
+      );
+      const cnt = Number(countRes.rows[0]?.cnt ?? 0);
+      const label = new Intl.DateTimeFormat("ru-RU", {
+        timeZone: salonTimezone,
+        weekday: "short",
+        day: "2-digit",
+        month: "2-digit"
+      }).format(new Date(`${d}T12:00:00.000Z`));
+      buttons.push({ text: `${label} (${cnt})`, callback_data: `adm:day:${d}` });
+    }
+    const rows = chunkButtons(buttons, 2);
+    rows.push([{ text: "Назад к меню", callback_data: "adm:menu" }]);
+    await sendTelegramMessage(botToken, chatId, "Выберите день для просмотра записей:", {
+      reply_markup: { inline_keyboard: rows }
+    });
+  };
+
   const message = req.body?.message;
   if (message?.chat?.id && message?.from?.id) {
     const chatId = Number(message.chat.id);
     const fromId = String(message.from.id);
     const text = String(message.text ?? "").trim();
-
-    const salonRes = await pool.query("SELECT name, slug FROM salons WHERE id = $1", [salonId]);
-    const salonName = String(salonRes.rows[0]?.name ?? "Ваш салон");
-    const salonSlug = String(salonRes.rows[0]?.slug ?? "");
-    const baseUrl = req.protocol + "://" + req.get("host");
-    const bookingUrl = `${baseUrl}/?salonId=${encodeURIComponent(salonId)}${salonSlug ? `&salon=${encodeURIComponent(salonSlug)}` : ""}`;
+    const contactPhone = message.contact?.phone_number ? normalizeRuPhone(String(message.contact.phone_number)) : null;
+    if (fromId !== adminTelegramUserId) {
+      if (message.contact?.phone_number && !contactPhone) {
+        await sendTelegramMessage(
+          botToken,
+          chatId,
+          "Номер введен с ошибкой, повторите. Формат: 8XXXXXXXXXX или +7XXXXXXXXXX."
+        );
+      }
+      await upsertTelegramClientProfile(salonId, message.from, contactPhone);
+      if (contactPhone) {
+        await sendTelegramMessage(botToken, chatId, "Телефон сохранен. Теперь можно записываться.", {
+          reply_markup: { remove_keyboard: true }
+        });
+      }
+    }
 
     if (fromId === adminTelegramUserId) {
+      const pendingActionRes = await pool.query(
+        "SELECT action_type, payload_json FROM telegram_admin_actions WHERE salon_id = $1 AND admin_telegram_user_id = $2",
+        [salonId, fromId]
+      );
+      const pendingAction = pendingActionRes.rowCount ? pendingActionRes.rows[0] : null;
+      if (pendingAction?.action_type === "pause_cancel_text" && !text.startsWith("/")) {
+        const reason = text.trim();
+        const start = String(pendingAction.payload_json?.startDate ?? "");
+        const end = String(pendingAction.payload_json?.endDate ?? "");
+        if (!start || !end) {
+          await sendTelegramMessage(botToken, chatId, "Не найден период паузы. Повторите выбор.");
+        } else {
+          await setPauseOnly(start, end);
+          const cancelled = await cancelBookingsInRangeWithMessage(start, end, reason);
+          await sendTelegramMessage(
+            botToken,
+            chatId,
+            `Пауза установлена: ${start} - ${end}.\nОтменено записей: ${cancelled}.`,
+            { reply_markup: adminMenuKeyboard() }
+          );
+        }
+        await pool.query("DELETE FROM telegram_admin_actions WHERE salon_id = $1 AND admin_telegram_user_id = $2", [
+          salonId,
+          fromId
+        ]);
+        return res.json({ ok: true, duplicate: false });
+      } else if (pendingAction?.action_type === "cancel_reason" && !text.startsWith("/")) {
+        const appointmentId = String(pendingAction.payload_json?.appointmentId ?? "");
+        const reasonRaw = text.trim();
+        const reason = reasonRaw === "-" ? "" : reasonRaw;
+        if (!appointmentId) {
+          await pool.query("DELETE FROM telegram_admin_actions WHERE salon_id = $1 AND admin_telegram_user_id = $2", [
+            salonId,
+            fromId
+          ]);
+        } else {
+          const row = await pool.query(
+            `SELECT id, client_name, client_telegram_user_id, start_at
+             FROM appointments
+             WHERE id = $1 AND salon_id = $2 AND status = 'booked'
+             LIMIT 1`,
+            [appointmentId, salonId]
+          );
+          if (!row.rowCount) {
+            await sendTelegramMessage(botToken, chatId, "Запись уже недоступна для отмены.");
+          } else {
+            await cancelAppointmentForSalon({
+              salonId,
+              appointmentId,
+              requestId: `adm-cancel-${salonId}-${appointmentId}-${Date.now()}`,
+              actor: "admin"
+            });
+            const a = row.rows[0];
+            const when = new Intl.DateTimeFormat("ru-RU", {
+              timeZone: salonTimezone,
+              weekday: "short",
+              day: "2-digit",
+              month: "2-digit",
+              hour: "2-digit",
+              minute: "2-digit"
+            }).format(new Date(String(a.start_at)));
+            await sendTelegramMessage(botToken, chatId, `Запись клиента ${a.client_name} на ${when} отменена.`);
+            const clientTelegramId = Number(a.client_telegram_user_id);
+            if (Number.isFinite(clientTelegramId)) {
+              await sendTelegramMessage(
+                botToken,
+                clientTelegramId,
+                `К сожалению, мастер отменил вашу запись на ${when}.${reason ? `\nПричина: ${reason}` : ""}\nНапишите "записаться", чтобы выбрать новое время.`
+              );
+            }
+          }
+          await pool.query("DELETE FROM telegram_admin_actions WHERE salon_id = $1 AND admin_telegram_user_id = $2", [
+            salonId,
+            fromId
+          ]);
+          return res.json({ ok: true, duplicate: false });
+        }
+      } else if (pendingAction?.action_type === "broadcast_text" && !text.startsWith("/")) {
+        const messageText = text.trim();
+        if (messageText.length < 3) {
+          await sendTelegramMessage(botToken, chatId, "Текст слишком короткий. Введите минимум 3 символа.");
+          return res.json({ ok: true, duplicate: false });
+        }
+        const clients = await pool.query(
+          `SELECT DISTINCT telegram_user_id
+           FROM telegram_clients
+           WHERE salon_id = $1`,
+          [salonId]
+        );
+        let sent = 0;
+        let failed = 0;
+        for (const c of clients.rows) {
+          const tgId = Number(c.telegram_user_id);
+          if (!Number.isFinite(tgId)) continue;
+          try {
+            await sendTelegramMessage(
+              botToken,
+              tgId,
+              `Сообщение от салона "${salonName}":\n\n${messageText}`
+            );
+            sent += 1;
+          } catch {
+            failed += 1;
+          }
+        }
+        await pool.query(
+          "INSERT INTO audit_logs (salon_id, action, payload_json) VALUES ($1,'admin_broadcast',$2)",
+          [salonId, JSON.stringify({ sent, failed, textLength: messageText.length })]
+        );
+        await pool.query("DELETE FROM telegram_admin_actions WHERE salon_id = $1 AND admin_telegram_user_id = $2", [
+          salonId,
+          fromId
+        ]);
+        await sendTelegramMessage(
+          botToken,
+          chatId,
+          `Рассылка завершена.\nОтправлено: ${sent}\nОшибок: ${failed}`
+        );
+        return res.json({ ok: true, duplicate: false });
+      }
       if (text === "/start" || text === "/help") {
         await sendTelegramMessage(botToken, chatId, [
           `Здравствуйте! Это бот салона "${salonName}".`,
           "",
-          "Команды:",
-          "/today - записи на сегодня",
-          "/status - статус подключения",
-          "/link - ссылка для клиентов"
-        ].join("\n"));
+          "Все действия доступны кнопками ниже: расписание, пауза, записи и статус."
+        ].join("\n"), { reply_markup: adminMenuKeyboard() });
       } else if (text === "/status") {
         await sendTelegramMessage(botToken, chatId, "Подключение активно. Бот работает корректно.");
       } else if (text === "/link") {
         await sendTelegramMessage(botToken, chatId, `Ссылка на запись для клиентов:\n${bookingUrl}`);
       } else if (text === "/today") {
-        const todayRes = await pool.query(
-          `SELECT client_name, client_phone, start_at
-           FROM appointments
-           WHERE salon_id = $1
-             AND status = 'booked'
-             AND date(start_at at time zone 'UTC') = current_date
-           ORDER BY start_at ASC
-           LIMIT 20`,
-          [salonId]
-        );
-        if (!todayRes.rowCount) {
-          await sendTelegramMessage(botToken, chatId, "На сегодня записей нет.");
-        } else {
-          const lines = todayRes.rows.map((r: any) => {
-            const hhmm = new Date(r.start_at).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
-            return `${hhmm} - ${r.client_name} (${r.client_phone})`;
-          });
-          await sendTelegramMessage(botToken, chatId, `Записи на сегодня (${todayRes.rowCount}):\n` + lines.join("\n"));
-        }
+        await renderAdminDay(chatId, dateKeyByOffset(0));
       } else {
-        await sendTelegramMessage(botToken, chatId, "Не понял команду. Наберите /help");
+        await sendTelegramMessage(botToken, chatId, "Используйте кнопки меню ниже.", { reply_markup: adminMenuKeyboard() });
       }
     } else {
-      if (text === "/start" || text.toLowerCase().includes("запис")) {
+      const profile = await getTelegramClientProfile(salonId, fromId);
+      const hasPhone = Boolean(profile?.client_phone);
+      const low = text.toLowerCase();
+      const normalizedPhone = normalizeRuPhone(text);
+      if (normalizedPhone) {
+        await upsertTelegramClientProfile(salonId, message.from, normalizedPhone);
+        await sendTelegramMessage(botToken, chatId, "Телефон сохранен. Теперь нажмите «Записаться».", {
+          reply_markup: { remove_keyboard: true }
+        });
+        await renderDateChoices(chatId);
+        return res.json({ ok: true, duplicate: false });
+      }
+      const looksLikePhoneAttempt = /[\d+]/.test(text) && !text.startsWith("/") && !low.includes("запис") && !low.includes("отмен");
+      if (looksLikePhoneAttempt && !hasPhone) {
         await sendTelegramMessage(
           botToken,
           chatId,
-          `Здравствуйте! Для записи в "${salonName}" откройте ссылку:\n${bookingUrl}`
+          "Номер введен с ошибкой, повторите. Формат: 8XXXXXXXXXX или +7XXXXXXXXXX."
         );
+      }
+      if (text === "/start") {
+        if (!hasPhone) {
+          await sendTelegramMessage(
+            botToken,
+            chatId,
+            `Здравствуйте! Это запись в "${salonName}". Сначала отправьте номер телефона, и после этого станет доступна запись.`
+          );
+        } else {
+          const activeBooking = await getActiveTelegramBooking(salonId, fromId);
+          if (activeBooking) {
+            const when = new Intl.DateTimeFormat("ru-RU", {
+              timeZone: salonTimezone,
+              weekday: "short",
+              day: "2-digit",
+              month: "2-digit",
+              hour: "2-digit",
+              minute: "2-digit"
+            }).format(new Date(activeBooking.start_at));
+            await sendTelegramMessage(
+              botToken,
+              chatId,
+              `У вас уже есть запись на ${when}. Новая запись будет доступна после отмены текущей.`,
+              { reply_markup: { inline_keyboard: [[{ text: "Отменить запись", callback_data: `bk:cancel:${activeBooking.id}` }]] } }
+            );
+            return res.json({ ok: true, duplicate: false });
+          }
+          await sendTelegramMessage(
+            botToken,
+            chatId,
+            `Здравствуйте! Это запись в "${salonName}". Нажмите кнопку ниже и выберите дату/время.`,
+            { reply_markup: { inline_keyboard: [[{ text: "Записаться", callback_data: "bk:start" }]] } }
+          );
+        }
+      } else if (low.includes("запис")) {
+        if (!hasPhone) {
+          await sendTelegramMessage(botToken, chatId, "Сначала отправьте номер телефона (один раз), затем запись станет доступна.");
+        } else {
+          const activeBooking = await getActiveTelegramBooking(salonId, fromId);
+          if (activeBooking) {
+            const when = new Intl.DateTimeFormat("ru-RU", {
+              timeZone: salonTimezone,
+              weekday: "short",
+              day: "2-digit",
+              month: "2-digit",
+              hour: "2-digit",
+              minute: "2-digit"
+            }).format(new Date(activeBooking.start_at));
+            await sendTelegramMessage(
+              botToken,
+              chatId,
+              `У вас уже есть запись на ${when}. Сначала отмените ее, если хотите выбрать другое время.`,
+              { reply_markup: { inline_keyboard: [[{ text: "Отменить запись", callback_data: `bk:cancel:${activeBooking.id}` }]] } }
+            );
+            return res.json({ ok: true, duplicate: false });
+          }
+          await renderDateChoices(chatId);
+        }
+      } else if (low.includes("отмен")) {
+        const activeBooking = await getActiveTelegramBooking(salonId, fromId);
+        if (!activeBooking) {
+          await sendTelegramMessage(botToken, chatId, "У вас нет активной записи для отмены.");
+        } else {
+          const when = new Intl.DateTimeFormat("ru-RU", {
+            timeZone: salonTimezone,
+            weekday: "short",
+            day: "2-digit",
+            month: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit"
+          }).format(new Date(activeBooking.start_at));
+          await sendTelegramMessage(botToken, chatId, `Отменить запись на ${when}?`, {
+            reply_markup: { inline_keyboard: [[{ text: "Отменить запись", callback_data: `bk:cancel:${activeBooking.id}` }]] }
+          });
+        }
+      } else if (text === "/web") {
+        await sendTelegramMessage(botToken, chatId, `Ссылка на веб-запись:\n${bookingUrl}`);
       } else {
+        if (!hasPhone) {
+          await sendTelegramMessage(botToken, chatId, "Сначала отправьте номер телефона, затем появится запись.");
+        } else {
+          await sendTelegramMessage(botToken, chatId, 'Нажмите "Записаться" или напишите "записаться".', {
+            reply_markup: { inline_keyboard: [[{ text: "Записаться", callback_data: "bk:start" }]] }
+          });
+        }
+      }
+      if (!hasPhone) {
+        await sendTelegramMessage(botToken, chatId, "Чтобы мастер видел ваш номер, поделитесь телефоном (один раз):", {
+          reply_markup: {
+            keyboard: [[{ text: "Поделиться телефоном", request_contact: true }]],
+            resize_keyboard: true,
+            one_time_keyboard: true
+          }
+        });
+      }
+    }
+  }
+
+  const callback = req.body?.callback_query;
+  if (callback?.from?.id && callback?.message?.chat?.id && callback?.id) {
+    const chatId = Number(callback.message.chat.id);
+    const fromId = String(callback.from.id);
+    const data = String(callback.data ?? "");
+    await answerCallbackQuery(botToken, String(callback.id));
+
+    if (fromId !== adminTelegramUserId) {
+      const profile = await getTelegramClientProfile(salonId, fromId);
+      if (!profile?.client_phone) {
+        await sendTelegramMessage(botToken, chatId, "Сначала отправьте номер телефона, затем можно выбирать дату и время.", {
+          reply_markup: {
+            keyboard: [[{ text: "Поделиться телефоном", request_contact: true }]],
+            resize_keyboard: true,
+            one_time_keyboard: true
+          }
+        });
+        return res.json({ ok: true, duplicate: false });
+      }
+      if (data === "bk:start") {
+        const activeBooking = await getActiveTelegramBooking(salonId, fromId);
+        if (activeBooking) {
+          const when = new Intl.DateTimeFormat("ru-RU", {
+            timeZone: salonTimezone,
+            weekday: "short",
+            day: "2-digit",
+            month: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit"
+          }).format(new Date(activeBooking.start_at));
+          await sendTelegramMessage(
+            botToken,
+            chatId,
+            `У вас уже есть запись на ${when}. Сначала отмените ее.`,
+            { reply_markup: { inline_keyboard: [[{ text: "Отменить запись", callback_data: `bk:cancel:${activeBooking.id}` }]] } }
+          );
+          return res.json({ ok: true, duplicate: false });
+        }
+        await renderDateChoices(chatId);
+      } else if (data.startsWith("bk:date:")) {
+        await renderTimeChoices(chatId, data.replace("bk:date:", ""));
+      } else if (data.startsWith("bk:slot:")) {
+        const startMs = Number(data.replace("bk:slot:", ""));
+        if (Number.isFinite(startMs)) {
+          const startAt = new Date(startMs).toISOString();
+          const label = new Intl.DateTimeFormat("ru-RU", {
+            timeZone: salonTimezone,
+            weekday: "short",
+            day: "2-digit",
+            month: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit"
+          }).format(new Date(startAt));
+          await sendTelegramMessage(botToken, chatId, `Подтвердите запись на ${label}`, {
+            reply_markup: {
+              inline_keyboard: [[{ text: "Подтвердить запись", callback_data: `bk:confirm:${startMs}` }]]
+            }
+          });
+        }
+      } else if (data.startsWith("bk:confirm:")) {
+        const startMs = Number(data.replace("bk:confirm:", ""));
+        if (Number.isFinite(startMs)) {
+          const profile = await getTelegramClientProfile(salonId, fromId);
+          if (!profile?.client_phone) {
+            await sendTelegramMessage(botToken, chatId, "Сначала поделитесь телефоном (кнопка ниже), затем повторите запись.", {
+              reply_markup: {
+                keyboard: [[{ text: "Поделиться телефоном", request_contact: true }]],
+                resize_keyboard: true,
+                one_time_keyboard: true
+              }
+            });
+          } else {
+            const existingInWindow = await pool.query(
+              `SELECT id, start_at
+               FROM appointments
+               WHERE salon_id = $1
+                 AND client_telegram_user_id = $2
+                 AND status = 'booked'
+                 AND start_at >= now()
+                 AND start_at < now() + interval '14 days'
+               ORDER BY start_at ASC
+               LIMIT 1`,
+              [salonId, fromId]
+            );
+            if (existingInWindow.rowCount) {
+              const when = new Intl.DateTimeFormat("ru-RU", {
+                timeZone: salonTimezone,
+                weekday: "short",
+                day: "2-digit",
+                month: "2-digit",
+                hour: "2-digit",
+                minute: "2-digit"
+              }).format(new Date(String(existingInWindow.rows[0].start_at)));
+              await sendTelegramMessage(
+                botToken,
+                chatId,
+                `Ограничение: 1 запись на 14 дней. У вас уже есть запись на ${when}.`,
+                {
+                  reply_markup: {
+                    inline_keyboard: [[{ text: "Отменить текущую запись", callback_data: `bk:cancel:${existingInWindow.rows[0].id}` }]]
+                  }
+                }
+              );
+              return res.json({ ok: true, duplicate: false });
+            }
+            const startAt = new Date(startMs).toISOString();
+            try {
+              const booking = await bookAppointmentForSalon({
+                salonId,
+                clientName: String(profile.client_name),
+                clientPhone: String(profile.client_phone),
+                clientTelegramUserId: fromId,
+                source: "telegram",
+                requestId: `tg-book-${salonId}-${fromId}-${startMs}`,
+                slotStartAt: startAt
+              });
+              const label = new Intl.DateTimeFormat("ru-RU", {
+                timeZone: salonTimezone,
+                weekday: "short",
+                day: "2-digit",
+                month: "2-digit",
+                hour: "2-digit",
+                minute: "2-digit"
+              }).format(new Date(startAt));
+              await sendTelegramMessage(
+                botToken,
+                chatId,
+                `Готово! Вы записаны на ${label}. Спасибо за запись, ждем вас с нетерпением!`,
+                {
+                reply_markup: { remove_keyboard: true }
+                }
+              );
+              await notifySalonAdmin(
+                salonId,
+                `Новая запись из Telegram:\n- клиент: ${profile.client_name}\n- телефон: ${profile.client_phone}\n- время: ${label}`
+              );
+            } catch (error) {
+              if (error instanceof ConflictError) {
+                await sendTelegramMessage(botToken, chatId, "Этот слот уже заняли. Выберите другое время.");
+                await renderDateChoices(chatId);
+              } else {
+                await sendTelegramMessage(botToken, chatId, "Не удалось создать запись. Попробуйте еще раз.");
+              }
+            }
+          }
+        }
+      } else if (data.startsWith("bk:cancel:")) {
+        const appointmentId = data.replace("bk:cancel:", "").trim();
+        if (!appointmentId) return res.json({ ok: true, duplicate: false });
+        const owned = await pool.query(
+          `SELECT id, start_at
+           FROM appointments
+           WHERE id = $1
+             AND salon_id = $2
+             AND client_telegram_user_id = $3
+             AND status = 'booked'
+           LIMIT 1`,
+          [appointmentId, salonId, fromId]
+        );
+        if (!owned.rowCount) {
+          await sendTelegramMessage(botToken, chatId, "Эту запись уже нельзя отменить.");
+          return res.json({ ok: true, duplicate: false });
+        }
+        try {
+          await cancelAppointmentForSalon({
+            salonId,
+            appointmentId,
+            requestId: `tg-cancel-${salonId}-${fromId}-${appointmentId}`,
+            actor: "client"
+          });
+          const when = new Intl.DateTimeFormat("ru-RU", {
+            timeZone: salonTimezone,
+            weekday: "short",
+            day: "2-digit",
+            month: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit"
+          }).format(new Date(String(owned.rows[0].start_at)));
+          await sendTelegramMessage(botToken, chatId, `Запись на ${when} отменена.`);
+          await notifySalonAdmin(salonId, `Клиент отменил запись на ${when}.`);
+        } catch (error) {
+          await sendTelegramMessage(botToken, chatId, `Не удалось отменить запись: ${(error as Error).message}`);
+        }
+      } else if (data.startsWith("rem:confirm:")) {
+        const appointmentId = data.replace("rem:confirm:", "").trim();
+        if (!appointmentId) return res.json({ ok: true, duplicate: false });
+        const own = await pool.query(
+          `SELECT id, start_at, client_confirmed_at
+           FROM appointments
+           WHERE id = $1
+             AND salon_id = $2
+             AND client_telegram_user_id = $3
+             AND status = 'booked'
+           LIMIT 1`,
+          [appointmentId, salonId, fromId]
+        );
+        if (!own.rowCount) {
+          await sendTelegramMessage(botToken, chatId, "Запись не найдена или уже неактивна.");
+          return res.json({ ok: true, duplicate: false });
+        }
+        if (!own.rows[0].client_confirmed_at) {
+          await pool.query("UPDATE appointments SET client_confirmed_at = now() WHERE id = $1", [appointmentId]);
+          const when = new Intl.DateTimeFormat("ru-RU", {
+            timeZone: salonTimezone,
+            weekday: "short",
+            day: "2-digit",
+            month: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit"
+          }).format(new Date(String(own.rows[0].start_at)));
+          await sendTelegramMessage(botToken, chatId, `Отлично, планы подтверждены. Ждем вас ${when}.`);
+          await notifySalonAdmin(salonId, `Клиент подтвердил визит на ${when}.`);
+        } else {
+          await sendTelegramMessage(botToken, chatId, "Планы уже подтверждены ранее.");
+        }
+      }
+    } else {
+      if (data === "adm:menu") {
+        await sendTelegramMessage(botToken, chatId, "Меню мастера:", { reply_markup: adminMenuKeyboard() });
+      } else if (data === "adm:schedule") {
+        await showScheduleMonthPicker(chatId);
+      } else if (data === "adm:reset:start") {
         await sendTelegramMessage(
           botToken,
           chatId,
-          `Напишите "записаться" или откройте ссылку:\n${bookingUrl}`
+          "Внимание: будет сброшен текущий режим (паузы и шаблон графика). Это действие необратимо.",
+          {
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: "Да, продолжить", callback_data: "adm:reset:confirm1" }],
+                [{ text: "Нет, отмена", callback_data: "adm:menu" }]
+              ]
+            }
+          }
         );
+      } else if (data === "adm:reset:confirm1") {
+        await sendTelegramMessage(
+          botToken,
+          chatId,
+          "Подтвердите еще раз: точно сбросить настройки?",
+          {
+            reply_markup: {
+              inline_keyboard: [
+                [{ text: "Да, сбросить", callback_data: "adm:reset:confirm2" }],
+                [{ text: "Нет, отмена", callback_data: "adm:menu" }]
+              ]
+            }
+          }
+        );
+      } else if (data === "adm:reset:confirm2") {
+        await pool.query("UPDATE booking_pauses SET is_active = false, updated_at = now() WHERE salon_id = $1", [salonId]);
+        await pool.query("UPDATE salon_work_patterns SET is_active = false, updated_at = now() WHERE salon_id = $1", [salonId]);
+        await pool.query(
+          "DELETE FROM telegram_admin_actions WHERE salon_id = $1 AND admin_telegram_user_id = $2",
+          [salonId, fromId]
+        );
+        await sendTelegramMessage(
+          botToken,
+          chatId,
+          "Настройки сброшены. Теперь выберите новый регламент работы.",
+          { reply_markup: adminMenuKeyboard() }
+        );
+        await showScheduleMonthPicker(chatId);
+      } else if (data.startsWith("adm:sch:month:")) {
+        const mode = data.replace("adm:sch:month:", "").trim() === "next" ? "next" : "current";
+        const monthRange = getMonthRange(mode);
+        await saveScheduleActionState(fromId, { monthMode: mode, monthStart: monthRange.start, monthEnd: monthRange.end });
+        await sendTelegramMessage(botToken, chatId, `Месяц ${monthRange.label}. Выберите шаблон:`, {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "Четные даты", callback_data: "adm:sch:pattern:even_dates" }],
+              [{ text: "Нечетные даты", callback_data: "adm:sch:pattern:odd_dates" }],
+              [{ text: "Через день", callback_data: "adm:sch:pattern:every_other_day" }],
+              [{ text: "Назад к меню", callback_data: "adm:menu" }]
+            ]
+          }
+        });
+      } else if (data.startsWith("adm:sch:pattern:")) {
+        const patternType = data.replace("adm:sch:pattern:", "").trim();
+        const st = await pool.query(
+          "SELECT payload_json FROM telegram_admin_actions WHERE salon_id = $1 AND admin_telegram_user_id = $2",
+          [salonId, fromId]
+        );
+        const prev = st.rowCount ? st.rows[0].payload_json : {};
+        const monthStart = String(prev.monthStart ?? "");
+        const monthEnd = String(prev.monthEnd ?? "");
+        if (!monthStart || !monthEnd) {
+          await sendTelegramMessage(botToken, chatId, "Сначала выберите месяц.");
+        } else {
+          const anchorDate = monthStart;
+          await pool.query(
+            "UPDATE salon_work_patterns SET is_active = false, updated_at = now() WHERE salon_id = $1 AND period_start = $2::date AND period_end = $3::date AND is_active = true",
+            [salonId, monthStart, monthEnd]
+          );
+          await pool.query(
+            `INSERT INTO salon_work_patterns
+              (salon_id, period_start, period_end, pattern_type, anchor_date, is_active, updated_at)
+             VALUES ($1,$2::date,$3::date,$4,$5::date,true,now())`,
+            [salonId, monthStart, monthEnd, patternType, anchorDate]
+          );
+          await pool.query("DELETE FROM telegram_admin_actions WHERE salon_id = $1 AND admin_telegram_user_id = $2", [
+            salonId,
+            fromId
+          ]);
+          const labelMap: Record<string, string> = {
+            even_dates: "Четные даты",
+            odd_dates: "Нечетные даты",
+            every_other_day: "Через день"
+          };
+          await sendTelegramMessage(
+            botToken,
+            chatId,
+            `График сохранен: ${labelMap[patternType] || patternType}, период ${monthStart} - ${monthEnd}.`,
+            { reply_markup: adminMenuKeyboard() }
+          );
+        }
+      } else if (data === "adm:pause:pick:start") {
+        const rows = pauseDateButtons("adm:pause:start:", 0, 28);
+        rows.push([{ text: "Назад к меню", callback_data: "adm:menu" }]);
+        await sendTelegramMessage(botToken, chatId, "Выберите дату начала паузы:", {
+          reply_markup: { inline_keyboard: rows }
+        });
+      } else if (data.startsWith("adm:pause:start:")) {
+        const start = data.replace("adm:pause:start:", "").trim();
+        await pool.query(
+          `INSERT INTO telegram_admin_actions (salon_id, admin_telegram_user_id, action_type, payload_json, updated_at)
+           VALUES ($1,$2,'pause_setup',$3,now())
+           ON CONFLICT (salon_id, admin_telegram_user_id)
+           DO UPDATE SET action_type='pause_setup', payload_json=EXCLUDED.payload_json, updated_at=now()`,
+          [salonId, fromId, JSON.stringify({ startDate: start })]
+        );
+        const rows = pauseDateButtons("adm:pause:end:", 0, 35);
+        rows.push([{ text: "Назад к меню", callback_data: "adm:menu" }]);
+        await sendTelegramMessage(botToken, chatId, `Начало паузы: ${start}. Теперь выберите дату окончания:`, {
+          reply_markup: { inline_keyboard: rows }
+        });
+      } else if (data.startsWith("adm:pause:end:")) {
+        const end = data.replace("adm:pause:end:", "").trim();
+        const st = await pool.query(
+          "SELECT action_type, payload_json FROM telegram_admin_actions WHERE salon_id = $1 AND admin_telegram_user_id = $2",
+          [salonId, fromId]
+        );
+        const payload = st.rowCount ? st.rows[0].payload_json : {};
+        const start = String(payload.startDate ?? "");
+        if (!start) {
+          await sendTelegramMessage(botToken, chatId, "Сначала выберите дату начала паузы.");
+        } else if (end < start) {
+          await sendTelegramMessage(botToken, chatId, "Дата окончания не может быть раньше даты начала. Выберите снова.");
+        } else {
+          const affectedCount = await countBookingsInRange(start, end);
+          await pool.query(
+            `INSERT INTO telegram_admin_actions (salon_id, admin_telegram_user_id, action_type, payload_json, updated_at)
+             VALUES ($1,$2,'pause_confirm',$3,now())
+             ON CONFLICT (salon_id, admin_telegram_user_id)
+             DO UPDATE SET action_type='pause_confirm', payload_json=EXCLUDED.payload_json, updated_at=now()`,
+            [salonId, fromId, JSON.stringify({ startDate: start, endDate: end, affectedCount })]
+          );
+          await sendTelegramMessage(
+            botToken,
+            chatId,
+            `Период паузы: ${start} - ${end}.\nНайдено записей в периоде: ${affectedCount}.`,
+            {
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: "Только закрыть новые записи", callback_data: "adm:pause:apply:block" }],
+                  [{ text: "Отменить записи с сообщением", callback_data: "adm:pause:apply:notify" }],
+                  [{ text: "Отмена", callback_data: "adm:pause:apply:cancel" }]
+                ]
+              }
+            }
+          );
+        }
+      } else if (data === "adm:pause:apply:block" || data === "adm:pause:apply:notify" || data === "adm:pause:apply:cancel") {
+        const st = await pool.query(
+          "SELECT action_type, payload_json FROM telegram_admin_actions WHERE salon_id = $1 AND admin_telegram_user_id = $2",
+          [salonId, fromId]
+        );
+        const payload = st.rowCount ? st.rows[0].payload_json : {};
+        const start = String(payload.startDate ?? "");
+        const end = String(payload.endDate ?? "");
+        const affectedCount = Number(payload.affectedCount ?? 0);
+        if (!start || !end) {
+          await sendTelegramMessage(botToken, chatId, "Нет данных по выбранному периоду. Повторите выбор паузы.", {
+            reply_markup: adminMenuKeyboard()
+          });
+          await pool.query("DELETE FROM telegram_admin_actions WHERE salon_id = $1 AND admin_telegram_user_id = $2", [
+            salonId,
+            fromId
+          ]);
+        } else if (data === "adm:pause:apply:cancel") {
+          await pool.query("DELETE FROM telegram_admin_actions WHERE salon_id = $1 AND admin_telegram_user_id = $2", [
+            salonId,
+            fromId
+          ]);
+          await sendTelegramMessage(botToken, chatId, "Пауза не применена.", { reply_markup: adminMenuKeyboard() });
+        } else if (data === "adm:pause:apply:block") {
+          await setPauseOnly(start, end);
+          await pool.query("DELETE FROM telegram_admin_actions WHERE salon_id = $1 AND admin_telegram_user_id = $2", [
+            salonId,
+            fromId
+          ]);
+          await sendTelegramMessage(
+            botToken,
+            chatId,
+            `Пауза установлена: ${start} - ${end}.\nСуществующие записи (${affectedCount}) не отменялись.`,
+            { reply_markup: adminMenuKeyboard() }
+          );
+        } else {
+          await pool.query(
+            `INSERT INTO telegram_admin_actions (salon_id, admin_telegram_user_id, action_type, payload_json, updated_at)
+             VALUES ($1,$2,'pause_cancel_text',$3,now())
+             ON CONFLICT (salon_id, admin_telegram_user_id)
+             DO UPDATE SET action_type='pause_cancel_text', payload_json=EXCLUDED.payload_json, updated_at=now()`,
+            [salonId, fromId, JSON.stringify({ startDate: start, endDate: end, affectedCount })]
+          );
+          await sendTelegramMessage(
+            botToken,
+            chatId,
+            "Введите текст, который получат клиенты при отмене записей в этом периоде."
+          );
+        }
+      } else if (data === "adm:resume") {
+        await pool.query("UPDATE booking_pauses SET is_active = false, updated_at = now() WHERE salon_id = $1 AND is_active = true", [
+          salonId
+        ]);
+        await sendTelegramMessage(botToken, chatId, "Пауза снята. Запись снова открыта.", { reply_markup: adminMenuKeyboard() });
+      } else if (data === "adm:broadcast:start") {
+        await sendTelegramMessage(botToken, chatId, "Вы уверены, что хотите сделать рассылку всем клиентам?", {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "Да, продолжить", callback_data: "adm:broadcast:confirm" }],
+              [{ text: "Нет, отмена", callback_data: "adm:broadcast:cancel" }]
+            ]
+          }
+        });
+      } else if (data === "adm:broadcast:confirm") {
+        await pool.query(
+          `INSERT INTO telegram_admin_actions (salon_id, admin_telegram_user_id, action_type, payload_json, updated_at)
+           VALUES ($1,$2,'broadcast_text',$3,now())
+           ON CONFLICT (salon_id, admin_telegram_user_id)
+           DO UPDATE SET action_type='broadcast_text', payload_json=EXCLUDED.payload_json, updated_at=now()`,
+          [salonId, fromId, JSON.stringify({ startedAt: new Date().toISOString() })]
+        );
+        await sendTelegramMessage(botToken, chatId, "Введите текст рассылки одним сообщением.");
+      } else if (data === "adm:broadcast:cancel") {
+        await pool.query("DELETE FROM telegram_admin_actions WHERE salon_id = $1 AND admin_telegram_user_id = $2", [
+          salonId,
+          fromId
+        ]);
+        await sendTelegramMessage(botToken, chatId, "Рассылка отменена.", { reply_markup: adminMenuKeyboard() });
+      } else if (data === "adm:status") {
+        await sendTelegramMessage(botToken, chatId, "Подключение активно. Бот работает корректно.");
+      } else if (data === "adm:link") {
+        await sendTelegramMessage(botToken, chatId, `Ссылка на запись для клиентов:\n${bookingUrl}`);
+      } else if (data === "adm:today") {
+        await renderAdminDay(chatId, dateKeyByOffset(0));
+      } else if (data === "adm:tomorrow") {
+        await renderAdminDay(chatId, dateKeyByOffset(1));
+      } else if (data === "adm:after") {
+        await renderAdminDay(chatId, dateKeyByOffset(2));
+      } else if (data === "adm:days") {
+        await renderAdmin14Days(chatId);
+      } else if (data.startsWith("adm:day:")) {
+        await renderAdminDay(chatId, data.replace("adm:day:", "").trim());
+      } else if (data.startsWith("adm:appt:")) {
+        const apptId = data.replace("adm:appt:", "").trim();
+        const row = await pool.query(
+          `SELECT id, client_name, client_phone, source, start_at
+           FROM appointments
+           WHERE id = $1 AND salon_id = $2 AND status = 'booked'
+           LIMIT 1`,
+          [apptId, salonId]
+        );
+        if (!row.rowCount) {
+          await sendTelegramMessage(botToken, chatId, "Запись не найдена.");
+        } else {
+          const a = row.rows[0];
+          const when = new Intl.DateTimeFormat("ru-RU", {
+            timeZone: salonTimezone,
+            weekday: "short",
+            day: "2-digit",
+            month: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit"
+          }).format(new Date(a.start_at));
+          await sendTelegramMessage(
+            botToken,
+            chatId,
+            `Детали записи:\n- время: ${when}\n- клиент: ${a.client_name}\n- телефон: ${a.client_phone}\n- канал: ${a.source}`,
+            {
+              reply_markup: {
+                inline_keyboard: [
+                  [{ text: "Отменить запись (мастер)", callback_data: `adm:cancel:${a.id}` }],
+                  [{ text: "Назад к меню", callback_data: "adm:menu" }]
+                ]
+              }
+            }
+          );
+        }
+      } else if (data.startsWith("adm:cancel:")) {
+        const appointmentId = data.replace("adm:cancel:", "").trim();
+        if (!appointmentId) return res.json({ ok: true, duplicate: false });
+        const row = await pool.query(
+          `SELECT id, client_name, start_at
+           FROM appointments
+           WHERE id = $1 AND salon_id = $2 AND status = 'booked'
+           LIMIT 1`,
+          [appointmentId, salonId]
+        );
+        if (!row.rowCount) {
+          await sendTelegramMessage(botToken, chatId, "Эту запись уже нельзя отменить.");
+        } else {
+          const a = row.rows[0];
+          const when = new Intl.DateTimeFormat("ru-RU", {
+            timeZone: salonTimezone,
+            weekday: "short",
+            day: "2-digit",
+            month: "2-digit",
+            hour: "2-digit",
+            minute: "2-digit"
+          }).format(new Date(String(a.start_at)));
+          await pool.query(
+            `INSERT INTO telegram_admin_actions (salon_id, admin_telegram_user_id, action_type, payload_json, updated_at)
+             VALUES ($1,$2,'cancel_reason',$3,now())
+             ON CONFLICT (salon_id, admin_telegram_user_id)
+             DO UPDATE SET action_type='cancel_reason', payload_json=EXCLUDED.payload_json, updated_at=now()`,
+            [salonId, fromId, JSON.stringify({ appointmentId })]
+          );
+          await sendTelegramMessage(
+            botToken,
+            chatId,
+            `Введите причину отмены для клиента (${a.client_name}, ${when}).\nЕсли без причины — отправьте "-" одним сообщением.`
+          );
+        }
+      } else if (data === "adm:none") {
+        // Free slot tap: keep silent, callback is already answered.
       }
     }
   }
@@ -652,16 +1831,100 @@ app.get("/metrics", async (_req, res) => {
   });
 });
 
-async function sendTelegramMessage(botToken: string, chatId: number, text: string): Promise<void> {
+function chunkButtons<T>(buttons: T[], rowSize: number): T[][] {
+  const rows: T[][] = [];
+  for (let i = 0; i < buttons.length; i += rowSize) {
+    rows.push(buttons.slice(i, i + rowSize));
+  }
+  return rows;
+}
+
+async function sendTelegramApi(botToken: string, method: string, payload: Record<string, unknown>): Promise<void> {
+  const resp = await fetch(`https://api.telegram.org/bot${botToken}/${method}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload)
+  });
+  if (!resp.ok) throw new Error(`telegram ${method} http ${resp.status}`);
+  const data: any = await resp.json();
+  if (!data?.ok) throw new Error(`telegram ${method} failed`);
+}
+
+async function answerCallbackQuery(botToken: string, callbackQueryId: string): Promise<void> {
   try {
-    await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text })
-    });
+    await sendTelegramApi(botToken, "answerCallbackQuery", { callback_query_id: callbackQueryId });
+  } catch {
+    // Ignore callback answer failures.
+  }
+}
+
+async function sendTelegramMessage(
+  botToken: string,
+  chatId: number,
+  text: string,
+  options?: { reply_markup?: Record<string, unknown> }
+): Promise<void> {
+  try {
+    await sendTelegramApi(botToken, "sendMessage", { chat_id: chatId, text, ...(options ?? {}) });
   } catch {
     // Ignore send errors to keep webhook idempotent and fast.
   }
+}
+
+async function upsertTelegramClientProfile(
+  salonId: string,
+  from: any,
+  phone: string | null
+): Promise<void> {
+  const telegramUserId = String(from?.id ?? "");
+  if (!telegramUserId) return;
+  const firstName = String(from?.first_name ?? "").trim();
+  const lastName = String(from?.last_name ?? "").trim();
+  const username = from?.username ? String(from.username) : null;
+  const fullName = `${firstName} ${lastName}`.trim() || username || `Telegram ${telegramUserId}`;
+  await pool.query(
+    `INSERT INTO telegram_clients
+      (salon_id, telegram_user_id, telegram_username, telegram_first_name, telegram_last_name, client_name, client_phone, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,now())
+     ON CONFLICT (salon_id, telegram_user_id)
+     DO UPDATE SET
+       telegram_username = EXCLUDED.telegram_username,
+       telegram_first_name = EXCLUDED.telegram_first_name,
+       telegram_last_name = EXCLUDED.telegram_last_name,
+       client_name = EXCLUDED.client_name,
+       client_phone = COALESCE(EXCLUDED.client_phone, telegram_clients.client_phone),
+       updated_at = now()`,
+    [salonId, telegramUserId, username, firstName || null, lastName || null, fullName, phone]
+  );
+}
+
+async function getTelegramClientProfile(
+  salonId: string,
+  telegramUserId: string
+): Promise<{ client_name: string; client_phone: string | null } | null> {
+  const row = await pool.query(
+    "SELECT client_name, client_phone FROM telegram_clients WHERE salon_id = $1 AND telegram_user_id = $2",
+    [salonId, telegramUserId]
+  );
+  return row.rowCount ? row.rows[0] : null;
+}
+
+async function getActiveTelegramBooking(
+  salonId: string,
+  telegramUserId: string
+): Promise<{ id: string; start_at: string } | null> {
+  const row = await pool.query(
+    `SELECT id, start_at
+     FROM appointments
+     WHERE salon_id = $1
+       AND client_telegram_user_id = $2
+       AND status = 'booked'
+       AND start_at >= now()
+     ORDER BY start_at ASC
+     LIMIT 1`,
+    [salonId, telegramUserId]
+  );
+  return row.rowCount ? row.rows[0] : null;
 }
 
 async function notifySalonAdmin(salonId: string, text: string): Promise<void> {
@@ -678,6 +1941,27 @@ async function notifySalonAdmin(salonId: string, text: string): Promise<void> {
   } catch {
     // Ignore notification errors.
   }
+}
+
+function minuteToHHMM(value: number): string {
+  const h = Math.floor(value / 60)
+    .toString()
+    .padStart(2, "0");
+  const m = (value % 60).toString().padStart(2, "0");
+  return `${h}:${m}`;
+}
+
+function weekdayRu(weekday: number): string {
+  const map = ["Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
+  return map[weekday] ?? String(weekday);
+}
+
+function normalizeRuPhone(raw: string): string | null {
+  const compact = raw.replace(/[\s\-()]/g, "");
+  if (/^\+7\d{10}$/.test(compact)) return compact;
+  if (/^8\d{10}$/.test(compact)) return `+7${compact.slice(1)}`;
+  if (/^7\d{10}$/.test(compact)) return `+7${compact.slice(1)}`;
+  return null;
 }
 
 const adminSettingsBody = z.object({
@@ -714,7 +1998,16 @@ app.put("/admin/settings", adminOnly, async (req: AuthedRequest, res) => {
       [req.admin!.salonId, req.admin!.adminId, JSON.stringify(parsed.data)]
     );
   });
-  await notifySalonAdmin(req.admin!.salonId, "Настройки применены: длительность слота, горизонт и таймзона обновлены.");
+  await notifySalonAdmin(
+    req.admin!.salonId,
+    [
+      "Настройки салона обновлены:",
+      `- длительность слота: ${parsed.data.slotDurationMinutes} мин`,
+      `- горизонт записи: ${parsed.data.bookingHorizonDays} дн`,
+      `- отмена не позже чем за: ${parsed.data.cancelCutoffHours} ч`,
+      `- таймзона: ${parsed.data.timezone}`
+    ].join("\n")
+  );
   res.json({ ok: true });
 });
 
@@ -748,7 +2041,17 @@ app.put("/admin/working-rules", adminOnly, async (req: AuthedRequest, res) => {
       [req.admin!.salonId, req.admin!.adminId, JSON.stringify(parsed.data.rules)]
     );
   });
-  await notifySalonAdmin(req.admin!.salonId, "Настройки применены: рабочее расписание обновлено.");
+  const activeRules = parsed.data.rules.filter((r) => r.isActive);
+  const preview = activeRules
+    .slice(0, 6)
+    .map((r) => `${weekdayRu(r.weekday)} ${minuteToHHMM(r.startMinute)}-${minuteToHHMM(r.endMinute)}`)
+    .join("; ");
+  await notifySalonAdmin(
+    req.admin!.salonId,
+    activeRules.length
+      ? `Рабочее расписание обновлено (${activeRules.length} активных дней):\n${preview}`
+      : "Рабочее расписание обновлено: активных дней нет."
+  );
   res.json({ ok: true });
 });
 
@@ -782,7 +2085,21 @@ app.put("/admin/exceptions", adminOnly, async (req: AuthedRequest, res) => {
       [req.admin!.salonId, req.admin!.adminId, JSON.stringify(parsed.data.exceptions)]
     );
   });
-  await notifySalonAdmin(req.admin!.salonId, "Настройки применены: исключения по датам обновлены.");
+  const closedCount = parsed.data.exceptions.filter((e) => e.isClosed).length;
+  const customCount = parsed.data.exceptions.filter((e) => !e.isClosed).length;
+  const preview = parsed.data.exceptions
+    .slice(0, 5)
+    .map((e) => {
+      if (e.isClosed) return `${e.date} закрыто`;
+      return `${e.date} ${minuteToHHMM(Number(e.customStartMinute ?? 0))}-${minuteToHHMM(Number(e.customEndMinute ?? 0))}`;
+    })
+    .join("; ");
+  await notifySalonAdmin(
+    req.admin!.salonId,
+    parsed.data.exceptions.length
+      ? `Исключения обновлены: ${closedCount} закрытых, ${customCount} с часами.\n${preview}`
+      : "Исключения очищены: специальных дат нет."
+  );
   res.json({ ok: true });
 });
 
@@ -815,4 +2132,8 @@ app.get("/owner", (_req, res) => {
 
 app.listen(config.port, () => {
   console.log(`booking-api started on port ${config.port}`);
+  scanAndNotify().catch((error) => console.error("initial reminder scan failed", error));
+  setInterval(() => {
+    scanAndNotify().catch((error) => console.error("reminder scan failed", error));
+  }, 60_000);
 });
