@@ -461,6 +461,14 @@ app.post("/admin/integration/telegram/auto-setup", adminOnly, async (req: Authed
       );
     });
 
+    const salonNameRes = await pool.query("SELECT name FROM salons WHERE id = $1", [req.admin!.salonId]);
+    const salonName = String(salonNameRes.rows[0]?.name ?? "Ваш салон");
+    await sendTelegramMessage(
+      parsed.data.telegramBotToken,
+      Number(parsed.data.telegramUserId),
+      `Салон "${salonName}" успешно подключен к системе Beautime. Можно настраивать график и принимать записи.`
+    );
+
     res.json({
       ok: true,
       webhookPath,
@@ -656,6 +664,22 @@ async function sendTelegramMessage(botToken: string, chatId: number, text: strin
   }
 }
 
+async function notifySalonAdmin(salonId: string, text: string): Promise<void> {
+  try {
+    const row = await pool.query(
+      "SELECT bot_token, telegram_user_id FROM telegram_integrations WHERE salon_id = $1",
+      [salonId]
+    );
+    if (!row.rowCount) return;
+    const botToken = String(row.rows[0].bot_token ?? "");
+    const telegramUserId = Number(row.rows[0].telegram_user_id);
+    if (!botToken || !Number.isFinite(telegramUserId)) return;
+    await sendTelegramMessage(botToken, telegramUserId, text);
+  } catch {
+    // Ignore notification errors.
+  }
+}
+
 const adminSettingsBody = z.object({
   slotDurationMinutes: z.union([z.literal(30), z.literal(45), z.literal(60)]),
   bookingHorizonDays: z.number().int().min(1).max(30),
@@ -690,6 +714,7 @@ app.put("/admin/settings", adminOnly, async (req: AuthedRequest, res) => {
       [req.admin!.salonId, req.admin!.adminId, JSON.stringify(parsed.data)]
     );
   });
+  await notifySalonAdmin(req.admin!.salonId, "Настройки применены: длительность слота, горизонт и таймзона обновлены.");
   res.json({ ok: true });
 });
 
@@ -723,6 +748,7 @@ app.put("/admin/working-rules", adminOnly, async (req: AuthedRequest, res) => {
       [req.admin!.salonId, req.admin!.adminId, JSON.stringify(parsed.data.rules)]
     );
   });
+  await notifySalonAdmin(req.admin!.salonId, "Настройки применены: рабочее расписание обновлено.");
   res.json({ ok: true });
 });
 
@@ -756,6 +782,7 @@ app.put("/admin/exceptions", adminOnly, async (req: AuthedRequest, res) => {
       [req.admin!.salonId, req.admin!.adminId, JSON.stringify(parsed.data.exceptions)]
     );
   });
+  await notifySalonAdmin(req.admin!.salonId, "Настройки применены: исключения по датам обновлены.");
   res.json({ ok: true });
 });
 

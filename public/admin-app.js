@@ -147,9 +147,23 @@ document.getElementById("acceptInviteBtn").onclick = async () => {
   }
   token = data.token;
   localStorage.setItem("adminToken", token);
-  inviteMsg.textContent = `Салон активирован: ${data.salonSlug}`;
+  inviteMsg.textContent = `Салон активирован: ${data.salonSlug}. Подключаем Telegram...`;
   inviteMsg.className = "ok";
+  const telegramBotToken = payload.telegramBotToken;
+  const telegramUserId = payload.telegramUserId;
+  document.getElementById("botToken").value = telegramBotToken;
+  document.getElementById("telegramUserId").value = telegramUserId;
+  enterAdminMode();
   showAdminPanels();
+  const setupOk = await runTelegramAutoSetup(telegramBotToken, telegramUserId, true);
+  if (!setupOk) return;
+  token = "";
+  localStorage.removeItem("adminToken");
+  document.getElementById("loginEmail").value = payload.email;
+  document.getElementById("loginPassword").value = "";
+  inviteMsg.textContent = "Активация завершена. Telegram подключен. Теперь войдите в админку.";
+  inviteMsg.className = "ok";
+  enterLoginMode();
 };
 
 document.getElementById("saveTelegramBtn").onclick = async () => {
@@ -176,21 +190,8 @@ document.getElementById("saveTelegramBtn").onclick = async () => {
 document.getElementById("autoSetupTelegramBtn").onclick = async () => {
   const telegramBotToken = document.getElementById("botToken").value.trim();
   const telegramUserId = document.getElementById("telegramUserId").value.trim();
-  const resp = await fetch("/admin/integration/telegram/auto-setup", {
-    method: "POST",
-    headers: authHeader(),
-    body: JSON.stringify({ telegramBotToken, telegramUserId })
-  });
-  const data = await resp.json();
-  if (!resp.ok) {
-    integrationMsg.textContent = data.message || "Ошибка автонастройки";
-    integrationMsg.className = "err";
-    return;
-  }
-  integrationMsg.textContent = "Бот подключен автоматически";
-  integrationMsg.className = "ok";
-  document.getElementById("webhookPath").value = data.webhookUrl || "";
-  document.getElementById("webhookSecret").value = data.webhookSecret || "";
+  const setupOk = await runTelegramAutoSetup(telegramBotToken, telegramUserId, false);
+  if (setupOk) showAdminPanels();
 };
 
 document.getElementById("checkTelegramBtn").onclick = async () => {
@@ -397,6 +398,53 @@ function showAdminPanels() {
   buildWeeklyRuleEditor();
 }
 
+function enterInviteMode() {
+  document.getElementById("authHeaderCard").classList.add("hidden");
+  document.getElementById("loginCard").classList.add("hidden");
+  document.getElementById("registerCard").classList.add("hidden");
+  document.getElementById("inviteCard").classList.remove("hidden");
+}
+
+function enterAdminMode() {
+  document.getElementById("authHeaderCard").classList.add("hidden");
+  document.getElementById("loginCard").classList.add("hidden");
+  document.getElementById("registerCard").classList.add("hidden");
+  document.getElementById("inviteCard").classList.add("hidden");
+}
+
+function enterLoginMode() {
+  document.getElementById("authHeaderCard").classList.remove("hidden");
+  document.getElementById("loginCard").classList.remove("hidden");
+  document.getElementById("registerCard").classList.add("hidden");
+  document.getElementById("inviteCard").classList.add("hidden");
+  document.getElementById("integrationCard").classList.add("hidden");
+  document.getElementById("settingsCard").classList.add("hidden");
+  document.getElementById("rulesCard").classList.add("hidden");
+  document.getElementById("exceptionsCard").classList.add("hidden");
+  document.getElementById("appointmentsCard").classList.add("hidden");
+}
+
+async function runTelegramAutoSetup(telegramBotToken, telegramUserId, silent) {
+  const resp = await fetch("/admin/integration/telegram/auto-setup", {
+    method: "POST",
+    headers: authHeader(),
+    body: JSON.stringify({ telegramBotToken, telegramUserId })
+  });
+  const data = await resp.json();
+  if (!resp.ok) {
+    integrationMsg.textContent = data.message || "Ошибка автонастройки";
+    integrationMsg.className = "err";
+    return false;
+  }
+  integrationMsg.textContent = silent
+    ? "Салон активирован и бот подключен автоматически"
+    : "Бот подключен автоматически";
+  integrationMsg.className = "ok";
+  document.getElementById("webhookPath").value = data.webhookUrl || "";
+  document.getElementById("webhookSecret").value = data.webhookSecret || "";
+  return true;
+}
+
 function preloadRulesFromText() {
   const defaults = [
     { weekday: 1, startMinute: 600, endMinute: 1080 },
@@ -424,6 +472,6 @@ showIntegrationIfAuthed();
 const params = new URLSearchParams(window.location.search);
 const inviteToken = params.get("invite");
 if (inviteToken) {
-  document.getElementById("inviteCard").classList.remove("hidden");
+  enterInviteMode();
   document.getElementById("inviteToken").value = inviteToken;
 }
