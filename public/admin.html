@@ -52,13 +52,11 @@
     </section>
 
     <section class="card hidden" id="inviteCard">
-      <h2>Подключение по инвайту</h2>
-      <label>Токен инвайта</label>
-      <input id="inviteToken" />
-      <label>Название салона</label>
-      <input id="inviteSalonName" />
-      <label>Slug салона (опционально)</label>
-      <input id="inviteSalonSlug" placeholder="beauty-lab" />
+      <h2>Подключение к системе записи</h2>
+      <p class="muted">Добро пожаловать! Подключите ваш салон к онлайн-записи и начните принимать клиентов в Telegram и Web.</p>
+      <input id="inviteToken" type="hidden" />
+      <label>Название салона или имя мастера</label>
+      <input id="inviteSalonName" placeholder="например: Krasotka / Анна" />
       <label>Email</label>
       <input id="inviteEmail" type="email" />
       <label>Пароль</label>
@@ -67,6 +65,18 @@
       <input id="inviteBotToken" />
       <label>Telegram User ID</label>
       <input id="inviteTelegramUserId" />
+      <div class="row">
+        <a href="https://t.me/BotFather" target="_blank" rel="noopener noreferrer" class="quick-link-btn">Открыть @BotFather</a>
+        <a href="https://t.me/userinfobot" target="_blank" rel="noopener noreferrer" class="quick-link-btn">Открыть @userinfobot</a>
+      </div>
+      <div class="card" style="margin-top:12px;">
+        <h2 style="font-size:16px;">Где взять Bot Token и Telegram User ID</h2>
+        <img
+          src="/assets/telegram-bot-token-guide.png"
+          alt="Инструкция по получению Telegram Bot Token и User ID"
+          style="width:100%;border-radius:12px;border:1px solid #374151;"
+        />
+      </div>
       <button id="acceptInviteBtn">Активировать салон</button>
       <p id="inviteMsg"></p>
     </section>
@@ -110,6 +120,7 @@
         <option value="30">30 минут</option>
         <option value="45">45 минут</option>
         <option value="60">60 минут</option>
+        <option value="120">120 минут (2 часа)</option>
       </select>
       <div class="row">
         <div>

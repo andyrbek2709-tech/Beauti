@@ -170,9 +170,8 @@ document.getElementById("applyResetBtn").onclick = async () => {
 
 document.getElementById("acceptInviteBtn").onclick = async () => {
   const payload = {
-    inviteToken: document.getElementById("inviteToken").value.trim(),
+    inviteToken: (document.getElementById("inviteToken").value || inviteToken || "").trim(),
     salonName: document.getElementById("inviteSalonName").value.trim(),
-    salonSlug: document.getElementById("inviteSalonSlug").value.trim() || undefined,
     email: document.getElementById("inviteEmail").value.trim(),
     password: document.getElementById("invitePassword").value.trim(),
     telegramBotToken: document.getElementById("inviteBotToken").value.trim(),
@@ -442,8 +441,13 @@ function showAdminPanels() {
   buildWeeklyRuleEditor();
 }
 
+function setInviteTheme(enabled) {
+  document.body.classList.toggle("invite-mode", Boolean(enabled));
+}
+
 function enterInviteMode() {
   inviteMode = true;
+  setInviteTheme(true);
   document.getElementById("authHeaderCard").classList.add("hidden");
   document.getElementById("loginCard").classList.add("hidden");
   document.getElementById("registerCard").classList.add("hidden");
@@ -457,6 +461,7 @@ function enterInviteMode() {
 
 function enterAdminMode() {
   inviteMode = false;
+  setInviteTheme(false);
   document.getElementById("authHeaderCard").classList.add("hidden");
   document.getElementById("loginCard").classList.add("hidden");
   document.getElementById("registerCard").classList.add("hidden");
@@ -465,6 +470,7 @@ function enterAdminMode() {
 
 function enterLoginMode() {
   inviteMode = false;
+  setInviteTheme(false);
   document.getElementById("authHeaderCard").classList.remove("hidden");
   document.getElementById("loginCard").classList.remove("hidden");
   document.getElementById("registerCard").classList.add("hidden");

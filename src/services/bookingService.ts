@@ -167,6 +167,13 @@ export async function getAvailabilityForSalon(salonId: string, from: string, to:
     list.push({ startMinute: Number(r.start_minute), endMinute: Number(r.end_minute) });
     rulesByWeekday.set(Number(r.weekday), list);
   }
+  // Safety fallback: if no working rules configured, expose a default daily window.
+  // This keeps booking available after reset/onboarding until the master sets a custom schedule.
+  if (!rulesRes.rowCount) {
+    for (let weekday = 0; weekday <= 6; weekday += 1) {
+      rulesByWeekday.set(weekday, [{ startMinute: 10 * 60, endMinute: 20 * 60 }]);
+    }
+  }
 
   const exByDate = new Map<string, { isClosed: boolean; customStartMinute: number | null; customEndMinute: number | null }>();
   for (const ex of exRes.rows) {

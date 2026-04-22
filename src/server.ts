@@ -176,7 +176,7 @@ app.post("/auth/register", async (req, res) => {
       ]);
       await client.query(
         `INSERT INTO master_settings (salon_id, slot_duration_minutes, booking_horizon_days, cancel_cutoff_hours, timezone)
-         VALUES ($1,30,14,2,$2)`,
+         VALUES ($1,60,14,2,$2)`,
         [salonId, config.timezone]
       );
       await client.query(
@@ -373,7 +373,7 @@ app.post("/auth/accept-invite", async (req, res) => {
       ]);
       await client.query(
         `INSERT INTO master_settings (salon_id, slot_duration_minutes, booking_horizon_days, cancel_cutoff_hours, timezone)
-         VALUES ($1,30,14,2,$2)`,
+         VALUES ($1,60,14,2,$2)`,
         [salonId, config.timezone]
       );
       await client.query(
@@ -793,18 +793,26 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
 
   const adminMenuKeyboard = () => ({
     inline_keyboard: [
-      [
-        { text: "Сегодня", callback_data: "adm:today" },
-        { text: "Завтра", callback_data: "adm:tomorrow" },
-        { text: "Послезавтра", callback_data: "adm:after" }
-      ],
-      [{ text: "Показать 14 дней", callback_data: "adm:days" }],
-      [{ text: "График: чет/нечет/через день", callback_data: "adm:schedule" }],
-      [{ text: "Пауза: выбрать даты", callback_data: "adm:pause:pick:start" }],
-      [{ text: "Возобновить запись", callback_data: "adm:resume" }],
-      [{ text: "Сбросить настройки", callback_data: "adm:reset:start" }],
-      [{ text: "Рассылка клиентам", callback_data: "adm:broadcast:start" }],
-      [{ text: "Статус подключения", callback_data: "adm:status" }, { text: "Ссылка клиентам", callback_data: "adm:link" }]
+      [{ text: "📋 Записи", callback_data: "adm:section:bookings" }],
+      [{ text: "🗓 График", callback_data: "adm:section:schedule" }],
+      [{ text: "⚙️ Настройки", callback_data: "adm:section:settings" }]
+    ]
+  });
+
+  const scheduleMenuKeyboard = () => ({
+    inline_keyboard: [
+      [{ text: "Рабочие дни", callback_data: "adm:workdays" }],
+      [{ text: "Рабочее время", callback_data: "adm:worktime" }],
+      [{ text: "Длительность записи", callback_data: "adm:duration" }],
+      [{ text: "Назад", callback_data: "adm:menu" }]
+    ]
+  });
+
+  const settingsMenuKeyboard = () => ({
+    inline_keyboard: [
+      [{ text: "Закрыть даты", callback_data: "adm:close-dates" }],
+      [{ text: "Сообщение клиентам", callback_data: "adm:broadcast:start" }],
+      [{ text: "Назад", callback_data: "adm:menu" }]
     ]
   });
 
@@ -925,6 +933,76 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
     return cancelled;
   };
 
+  const renderBookingsHome = async (chatId: number) => {
+    const today = dateKeyByOffset(0);
+    const tomorrow = dateKeyByOffset(1);
+    const weekDays = Array.from({ length: 7 }, (_, i) => dateKeyByOffset(i));
+    const [todayCountRes, nearestRes] = await Promise.all([
+      pool.query(
+        `SELECT count(*)::int as cnt
+         FROM appointments
+         WHERE salon_id = $1
+           AND status = 'booked'
+           AND start_at >= $2::timestamptz
+           AND start_at <= $3::timestamptz`,
+        [salonId, `${today}T00:00:00.000Z`, `${today}T23:59:59.999Z`]
+      ),
+      pool.query(
+        `SELECT id, client_name, start_at
+         FROM appointments
+         WHERE salon_id = $1
+           AND status = 'booked'
+           AND start_at >= now()
+         ORDER BY start_at ASC
+         LIMIT 1`,
+        [salonId]
+      )
+    ]);
+
+    const dayButtons: Array<{ text: string; callback_data: string }> = [];
+    for (const d of weekDays) {
+      const cntRes = await pool.query(
+        `SELECT count(*)::int as cnt
+         FROM appointments
+         WHERE salon_id = $1
+           AND status = 'booked'
+           AND start_at >= $2::timestamptz
+           AND start_at <= $3::timestamptz`,
+        [salonId, `${d}T00:00:00.000Z`, `${d}T23:59:59.999Z`]
+      );
+      const cnt = Number(cntRes.rows[0]?.cnt ?? 0);
+      const shortDay = new Intl.DateTimeFormat("ru-RU", { timeZone: salonTimezone, weekday: "short" })
+        .format(new Date(`${d}T12:00:00.000Z`))
+        .replace(".", "");
+      dayButtons.push({
+        text: `${shortDay[0]?.toUpperCase() ?? shortDay}${shortDay.slice(1)} (${cnt})`,
+        callback_data: `adm:day:${d}`
+      });
+    }
+    const todayCount = Number(todayCountRes.rows[0]?.cnt ?? 0);
+    const nearest = nearestRes.rowCount ? nearestRes.rows[0] : null;
+    const nearestLine = nearest
+      ? `${new Intl.DateTimeFormat("ru-RU", {
+          timeZone: salonTimezone,
+          weekday: "short",
+          day: "2-digit",
+          month: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit"
+        }).format(new Date(String(nearest.start_at)))} - ${nearest.client_name}`
+      : "нет ближайшей записи";
+    const keyboardRows = chunkButtons(dayButtons, 2);
+    keyboardRows.push([{ text: "Сегодня", callback_data: `adm:day:${today}` }, { text: "Завтра", callback_data: `adm:day:${tomorrow}` }]);
+    keyboardRows.push([{ text: "Следующие 14 дней", callback_data: "adm:days" }]);
+    keyboardRows.push([{ text: "Главное меню", callback_data: "adm:menu" }]);
+    await sendTelegramMessage(
+      botToken,
+      chatId,
+      `Записи\nСегодня: ${todayCount}\nБлижайшая: ${nearestLine}\n\nЗагрузка по дням:`,
+      { reply_markup: { inline_keyboard: keyboardRows } }
+    );
+  };
+
   const renderAdminDay = async (chatId: number, dateKey: string) => {
     const from = `${dateKey}T00:00:00.000Z`;
     const to = `${dateKey}T23:59:59.999Z`;
@@ -950,24 +1028,21 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
         new Date(slot.startAt)
       );
       const booked = bookedByStart.get(slot.startAt);
-      if (booked) {
-        buttons.push({ text: `🟩 ${time}`, callback_data: `adm:appt:${booked.id}` });
-      } else {
-        buttons.push({ text: `⬜ ${time}`, callback_data: "adm:none" });
-      }
+      if (booked) buttons.push({ text: `🟠 ${time}`, callback_data: `adm:appt:${booked.id}` });
+      else buttons.push({ text: `🟢 ${time}`, callback_data: "adm:none" });
     }
     if (!buttons.length) {
       await sendTelegramMessage(botToken, chatId, `На ${dateKey} рабочие слоты не настроены.`, {
-        reply_markup: { inline_keyboard: [[{ text: "Назад к меню", callback_data: "adm:menu" }]] }
+        reply_markup: { inline_keyboard: [[{ text: "Назад к записям", callback_data: "adm:section:bookings" }]] }
       });
       return;
     }
     const keyboardRows = chunkButtons(buttons.slice(0, 30), 3);
-    keyboardRows.push([{ text: "Назад к меню", callback_data: "adm:menu" }]);
+    keyboardRows.push([{ text: "Назад к записям", callback_data: "adm:section:bookings" }]);
     await sendTelegramMessage(
       botToken,
       chatId,
-      `Расписание на ${dateKey}.\n🟩 занято, ⬜ свободно.\nНажмите на занятое время, чтобы открыть клиента.`,
+      `${dateKey}\n🟢 свободно\n🟠 занято`,
       {
       reply_markup: { inline_keyboard: keyboardRows }
       }
@@ -997,7 +1072,7 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
       buttons.push({ text: `${label} (${cnt})`, callback_data: `adm:day:${d}` });
     }
     const rows = chunkButtons(buttons, 2);
-    rows.push([{ text: "Назад к меню", callback_data: "adm:menu" }]);
+    rows.push([{ text: "Назад к записям", callback_data: "adm:section:bookings" }]);
     await sendTelegramMessage(botToken, chatId, "Выберите день для просмотра записей:", {
       reply_markup: { inline_keyboard: rows }
     });
@@ -1147,11 +1222,13 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
         return res.json({ ok: true, duplicate: false });
       }
       if (text === "/start" || text === "/help") {
-        await sendTelegramMessage(botToken, chatId, [
-          `Здравствуйте! Это бот салона "${salonName}".`,
-          "",
-          "Все действия доступны кнопками ниже: расписание, пауза, записи и статус."
-        ].join("\n"), { reply_markup: adminMenuKeyboard() });
+        await sendTelegramMessage(
+          botToken,
+          chatId,
+          `Здравствуйте! Это бот мастера салона "${salonName}".`,
+          { reply_markup: adminMenuKeyboard() }
+        );
+        await renderBookingsHome(chatId);
       } else if (text === "/status") {
         await sendTelegramMessage(botToken, chatId, "Подключение активно. Бот работает корректно.");
       } else if (text === "/link") {
@@ -1159,7 +1236,7 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
       } else if (text === "/today") {
         await renderAdminDay(chatId, dateKeyByOffset(0));
       } else {
-        await sendTelegramMessage(botToken, chatId, "Используйте кнопки меню ниже.", { reply_markup: adminMenuKeyboard() });
+        await sendTelegramMessage(botToken, chatId, "Выберите раздел.", { reply_markup: adminMenuKeyboard() });
       }
     } else {
       const profile = await getTelegramClientProfile(salonId, fromId);
@@ -1498,8 +1575,130 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
     } else {
       if (data === "adm:menu") {
         await sendTelegramMessage(botToken, chatId, "Меню мастера:", { reply_markup: adminMenuKeyboard() });
+      } else if (data === "adm:section:bookings") {
+        await renderBookingsHome(chatId);
+      } else if (data === "adm:section:schedule") {
+        await sendTelegramMessage(botToken, chatId, "График", { reply_markup: scheduleMenuKeyboard() });
+      } else if (data === "adm:section:settings") {
+        await sendTelegramMessage(botToken, chatId, "Настройки", { reply_markup: settingsMenuKeyboard() });
       } else if (data === "adm:schedule") {
         await showScheduleMonthPicker(chatId);
+      } else if (data === "adm:workdays") {
+        const rows = await pool.query(
+          `SELECT weekday, is_active
+           FROM working_rules
+           WHERE salon_id = $1`,
+          [salonId]
+        );
+        const state = new Map<number, boolean>();
+        for (const r of rows.rows) state.set(Number(r.weekday), Boolean(r.is_active));
+        const labels = ["Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
+        const buttons = labels.map((label, weekday) => ({
+          text: `${label}: ${state.get(weekday) === false ? "не работает" : "работает"}`,
+          callback_data: `adm:wd:toggle:${weekday}`
+        }));
+        const kb = chunkButtons(buttons, 1);
+        kb.push([{ text: "Назад", callback_data: "adm:section:schedule" }]);
+        await sendTelegramMessage(botToken, chatId, "Рабочие дни", { reply_markup: { inline_keyboard: kb } });
+      } else if (data.startsWith("adm:wd:toggle:")) {
+        const weekday = Number(data.replace("adm:wd:toggle:", "").trim());
+        if (weekday < 0 || weekday > 6 || !Number.isFinite(weekday)) {
+          await sendTelegramMessage(botToken, chatId, "Некорректный день.");
+        } else {
+          const row = await pool.query(
+            `SELECT start_minute, end_minute, is_active
+             FROM working_rules
+             WHERE salon_id = $1 AND weekday = $2
+             LIMIT 1`,
+            [salonId, weekday]
+          );
+          const currentActive = row.rowCount ? Boolean(row.rows[0].is_active) : true;
+          const startMinute = row.rowCount ? Number(row.rows[0].start_minute) : 600;
+          const endMinute = row.rowCount ? Number(row.rows[0].end_minute) : 1200;
+          await pool.query(
+            `INSERT INTO working_rules (salon_id, weekday, start_minute, end_minute, is_active)
+             VALUES ($1,$2,$3,$4,$5)
+             ON CONFLICT (salon_id, weekday) DO UPDATE
+             SET is_active = EXCLUDED.is_active`,
+            [salonId, weekday, startMinute, endMinute, !currentActive]
+          );
+          await sendTelegramMessage(botToken, chatId, "День обновлен.");
+          await sendTelegramMessage(botToken, chatId, "График", { reply_markup: scheduleMenuKeyboard() });
+        }
+      } else if (data === "adm:worktime") {
+        await sendTelegramMessage(botToken, chatId, "Рабочее время", {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "09:00 - 18:00", callback_data: "adm:worktime:set:540:1080" }],
+              [{ text: "10:00 - 19:00", callback_data: "adm:worktime:set:600:1140" }],
+              [{ text: "11:00 - 20:00", callback_data: "adm:worktime:set:660:1200" }],
+              [{ text: "Назад", callback_data: "adm:section:schedule" }]
+            ]
+          }
+        });
+      } else if (data.startsWith("adm:worktime:set:")) {
+        const parts = data.split(":");
+        const startMinute = Number(parts[3] ?? "");
+        const endMinute = Number(parts[4] ?? "");
+        if (!Number.isFinite(startMinute) || !Number.isFinite(endMinute) || endMinute <= startMinute) {
+          await sendTelegramMessage(botToken, chatId, "Некорректный интервал времени.");
+        } else {
+          await pool.query(
+            `UPDATE working_rules
+             SET start_minute = $2, end_minute = $3
+             WHERE salon_id = $1`,
+            [salonId, startMinute, endMinute]
+          );
+          await sendTelegramMessage(botToken, chatId, `Рабочее время обновлено: ${minuteToHHMM(startMinute)} - ${minuteToHHMM(endMinute)}.`);
+          await sendTelegramMessage(botToken, chatId, "График", { reply_markup: scheduleMenuKeyboard() });
+        }
+      } else if (data === "adm:duration") {
+        await sendTelegramMessage(botToken, chatId, "Длительность записи", {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "30 минут", callback_data: "adm:slot:set:30" }],
+              [{ text: "60 минут", callback_data: "adm:slot:set:60" }],
+              [{ text: "120 минут", callback_data: "adm:slot:set:120" }],
+              [{ text: "Назад", callback_data: "adm:section:schedule" }]
+            ]
+          }
+        });
+      } else if (data === "adm:slot:menu") {
+        await sendTelegramMessage(botToken, chatId, "Выберите сетку времени работы:", {
+          reply_markup: {
+            inline_keyboard: [
+              [
+                { text: "30 минут", callback_data: "adm:slot:set:30" },
+                { text: "1 час", callback_data: "adm:slot:set:60" },
+                { text: "2 часа", callback_data: "adm:slot:set:120" }
+              ],
+              [{ text: "Назад к меню", callback_data: "adm:menu" }]
+            ]
+          }
+        });
+      } else if (data.startsWith("adm:slot:set:")) {
+        const slotMinutes = Number(data.replace("adm:slot:set:", "").trim());
+        if (![30, 60, 120].includes(slotMinutes)) {
+          await sendTelegramMessage(botToken, chatId, "Некорректное значение сетки.");
+        } else {
+          await pool.query(
+            `INSERT INTO master_settings (salon_id, slot_duration_minutes, booking_horizon_days, cancel_cutoff_hours, timezone)
+             VALUES (
+               $1,
+               $2,
+               COALESCE((SELECT booking_horizon_days FROM master_settings WHERE salon_id = $1), 14),
+               COALESCE((SELECT cancel_cutoff_hours FROM master_settings WHERE salon_id = $1), 2),
+               COALESCE((SELECT timezone FROM master_settings WHERE salon_id = $1), $3)
+             )
+             ON CONFLICT (salon_id) DO UPDATE
+             SET slot_duration_minutes = EXCLUDED.slot_duration_minutes`,
+            [salonId, slotMinutes, config.timezone]
+          );
+          await sendTelegramMessage(botToken, chatId, `Сетка записи обновлена: ${slotMinutes} мин.`, {
+            reply_markup: adminMenuKeyboard()
+          });
+          await notifySalonAdmin(salonId, `Настройки применены: сетка записи ${slotMinutes} мин.`);
+        }
       } else if (data === "adm:reset:start") {
         await sendTelegramMessage(
           botToken,
@@ -1532,13 +1731,23 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
         await pool.query("UPDATE booking_pauses SET is_active = false, updated_at = now() WHERE salon_id = $1", [salonId]);
         await pool.query("UPDATE salon_work_patterns SET is_active = false, updated_at = now() WHERE salon_id = $1", [salonId]);
         await pool.query(
+          `INSERT INTO master_settings (salon_id, slot_duration_minutes, booking_horizon_days, cancel_cutoff_hours, timezone)
+           VALUES ($1,60,14,2,$2)
+           ON CONFLICT (salon_id) DO UPDATE
+           SET slot_duration_minutes = 60,
+               booking_horizon_days = 14,
+               cancel_cutoff_hours = 2,
+               timezone = COALESCE(master_settings.timezone, EXCLUDED.timezone)`,
+          [salonId, config.timezone]
+        );
+        await pool.query(
           "DELETE FROM telegram_admin_actions WHERE salon_id = $1 AND admin_telegram_user_id = $2",
           [salonId, fromId]
         );
         await sendTelegramMessage(
           botToken,
           chatId,
-          "Настройки сброшены. Теперь выберите новый регламент работы.",
+          "Настройки сброшены. По умолчанию установлено: сетка 1 час, горизонт записи 14 дней. Теперь выберите новый регламент работы.",
           { reply_markup: adminMenuKeyboard() }
         );
         await showScheduleMonthPicker(chatId);
@@ -1595,10 +1804,35 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
             { reply_markup: adminMenuKeyboard() }
           );
         }
+      } else if (data === "adm:close-dates") {
+        await sendTelegramMessage(botToken, chatId, "Закрыть даты", {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "Сегодня", callback_data: "adm:pause:start:today" }],
+              [{ text: "Завтра", callback_data: "adm:pause:start:tomorrow" }],
+              [{ text: "Выбрать вручную", callback_data: "adm:pause:pick:start" }],
+              [{ text: "Назад", callback_data: "adm:section:settings" }]
+            ]
+          }
+        });
+      } else if (data === "adm:pause:start:today" || data === "adm:pause:start:tomorrow") {
+        const start = data === "adm:pause:start:today" ? dateKeyByOffset(0) : dateKeyByOffset(1);
+        await pool.query(
+          `INSERT INTO telegram_admin_actions (salon_id, admin_telegram_user_id, action_type, payload_json, updated_at)
+           VALUES ($1,$2,'pause_setup',$3,now())
+           ON CONFLICT (salon_id, admin_telegram_user_id)
+           DO UPDATE SET action_type='pause_setup', payload_json=EXCLUDED.payload_json, updated_at=now()`,
+          [salonId, fromId, JSON.stringify({ startDate: start })]
+        );
+        const rows = pauseDateButtons("adm:pause:end:", 0, 35);
+        rows.push([{ text: "Назад", callback_data: "adm:section:settings" }]);
+        await sendTelegramMessage(botToken, chatId, `Начало: ${start}. Выберите конец:`, {
+          reply_markup: { inline_keyboard: rows }
+        });
       } else if (data === "adm:pause:pick:start") {
         const rows = pauseDateButtons("adm:pause:start:", 0, 28);
-        rows.push([{ text: "Назад к меню", callback_data: "adm:menu" }]);
-        await sendTelegramMessage(botToken, chatId, "Выберите дату начала паузы:", {
+        rows.push([{ text: "Назад", callback_data: "adm:section:settings" }]);
+        await sendTelegramMessage(botToken, chatId, "Выберите дату начала:", {
           reply_markup: { inline_keyboard: rows }
         });
       } else if (data.startsWith("adm:pause:start:")) {
@@ -1767,12 +2001,12 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
           await sendTelegramMessage(
             botToken,
             chatId,
-            `Детали записи:\n- время: ${when}\n- клиент: ${a.client_name}\n- телефон: ${a.client_phone}\n- канал: ${a.source}`,
+            `Клиент: ${a.client_name}\nВремя: ${when}\nКонтакт: ${a.client_phone}`,
             {
               reply_markup: {
                 inline_keyboard: [
-                  [{ text: "Отменить запись (мастер)", callback_data: `adm:cancel:${a.id}` }],
-                  [{ text: "Назад к меню", callback_data: "adm:menu" }]
+                  [{ text: "Отменить запись", callback_data: `adm:cancel:${a.id}` }],
+                  [{ text: "Назад к записям", callback_data: "adm:section:bookings" }]
                 ]
               }
             }
@@ -1965,7 +2199,7 @@ function normalizeRuPhone(raw: string): string | null {
 }
 
 const adminSettingsBody = z.object({
-  slotDurationMinutes: z.union([z.literal(30), z.literal(45), z.literal(60)]),
+  slotDurationMinutes: z.union([z.literal(30), z.literal(45), z.literal(60), z.literal(120)]),
   bookingHorizonDays: z.number().int().min(1).max(30),
   cancelCutoffHours: z.number().int().min(0).max(48),
   timezone: z.string().min(1)
