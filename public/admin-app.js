@@ -1,4 +1,5 @@
 let token = localStorage.getItem("adminToken") || "";
+let inviteMode = false;
 const authMsg = document.getElementById("authMsg");
 const registerMsg = document.getElementById("registerMsg");
 const integrationMsg = document.getElementById("integrationMsg");
@@ -25,6 +26,7 @@ function authHeader() {
 }
 
 async function showIntegrationIfAuthed() {
+  if (inviteMode) return;
   if (!token) return;
   const resp = await fetch("/admin/profile", { headers: { authorization: `Bearer ${token}` } });
   if (resp.ok) {
@@ -399,13 +401,20 @@ function showAdminPanels() {
 }
 
 function enterInviteMode() {
+  inviteMode = true;
   document.getElementById("authHeaderCard").classList.add("hidden");
   document.getElementById("loginCard").classList.add("hidden");
   document.getElementById("registerCard").classList.add("hidden");
   document.getElementById("inviteCard").classList.remove("hidden");
+  document.getElementById("integrationCard").classList.add("hidden");
+  document.getElementById("settingsCard").classList.add("hidden");
+  document.getElementById("rulesCard").classList.add("hidden");
+  document.getElementById("exceptionsCard").classList.add("hidden");
+  document.getElementById("appointmentsCard").classList.add("hidden");
 }
 
 function enterAdminMode() {
+  inviteMode = false;
   document.getElementById("authHeaderCard").classList.add("hidden");
   document.getElementById("loginCard").classList.add("hidden");
   document.getElementById("registerCard").classList.add("hidden");
@@ -413,6 +422,7 @@ function enterAdminMode() {
 }
 
 function enterLoginMode() {
+  inviteMode = false;
   document.getElementById("authHeaderCard").classList.remove("hidden");
   document.getElementById("loginCard").classList.remove("hidden");
   document.getElementById("registerCard").classList.add("hidden");
@@ -467,11 +477,14 @@ function preloadRulesFromText() {
 
 buildWeeklyRuleEditor();
 preloadRulesFromText();
-showIntegrationIfAuthed();
 
 const params = new URLSearchParams(window.location.search);
 const inviteToken = params.get("invite");
 if (inviteToken) {
+  token = "";
+  localStorage.removeItem("adminToken");
   enterInviteMode();
   document.getElementById("inviteToken").value = inviteToken;
+} else {
+  showIntegrationIfAuthed();
 }
