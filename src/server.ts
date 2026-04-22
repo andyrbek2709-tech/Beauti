@@ -795,7 +795,8 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
     inline_keyboard: [
       [{ text: "📋 Записи", callback_data: "adm:section:bookings" }],
       [{ text: "🗓 График", callback_data: "adm:section:schedule" }],
-      [{ text: "⚙️ Настройки", callback_data: "adm:section:settings" }]
+      [{ text: "⚙️ Настройки", callback_data: "adm:section:settings" }],
+      [{ text: "❓ Помощь", callback_data: "adm:section:help" }]
     ]
   });
 
@@ -1028,8 +1029,8 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
         new Date(slot.startAt)
       );
       const booked = bookedByStart.get(slot.startAt);
-      if (booked) buttons.push({ text: `🟠 ${time}`, callback_data: `adm:appt:${booked.id}` });
-      else buttons.push({ text: `🟢 ${time}`, callback_data: "adm:none" });
+      if (booked) buttons.push({ text: `${time} • 👤`, callback_data: `adm:appt:${booked.id}` });
+      else buttons.push({ text: `${time}`, callback_data: "adm:none" });
     }
     if (!buttons.length) {
       await sendTelegramMessage(botToken, chatId, `На ${dateKey} рабочие слоты не настроены.`, {
@@ -1037,15 +1038,43 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
       });
       return;
     }
-    const keyboardRows = chunkButtons(buttons.slice(0, 30), 3);
+    const keyboardRows = chunkButtons(buttons.slice(0, 30), 2);
     keyboardRows.push([{ text: "Назад к записям", callback_data: "adm:section:bookings" }]);
     await sendTelegramMessage(
       botToken,
       chatId,
-      `${dateKey}\n🟢 свободно\n🟠 занято`,
+      `Записи на ${dateKey}`,
       {
       reply_markup: { inline_keyboard: keyboardRows }
       }
+    );
+  };
+
+  const renderHelp = async (chatId: number) => {
+    await sendTelegramMessage(
+      botToken,
+      chatId,
+      [
+        "Этот бот помогает вам быстро управлять записями клиентов.",
+        "",
+        "Как смотреть записи",
+        "Откройте раздел «Записи», выберите день и нажмите нужное время. Слот с клиентом отмечен значком 👤.",
+        "",
+        "Как отменить запись",
+        "Откройте занятый слот, нажмите «Отменить запись» и отправьте причину (или «-» без причины).",
+        "",
+        "Как настроить график",
+        "Раздел «График»: там вы меняете рабочие дни, рабочее время и длительность записи.",
+        "",
+        "Как закрыть даты",
+        "Раздел «Настройки» → «Закрыть даты». Выберите сегодня, завтра или нужные даты вручную.",
+        "",
+        "Сообщения клиентам",
+        "Раздел «Настройки» → «Сообщение клиентам». Введите текст и отправьте всем клиентам.",
+        "",
+        "Если не уверены — смело нажимайте кнопки. Все шаги простые и понятные."
+      ].join("\n"),
+      { reply_markup: adminMenuKeyboard() }
     );
   };
 
@@ -1581,6 +1610,8 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
         await sendTelegramMessage(botToken, chatId, "График", { reply_markup: scheduleMenuKeyboard() });
       } else if (data === "adm:section:settings") {
         await sendTelegramMessage(botToken, chatId, "Настройки", { reply_markup: settingsMenuKeyboard() });
+      } else if (data === "adm:section:help") {
+        await renderHelp(chatId);
       } else if (data === "adm:schedule") {
         await showScheduleMonthPicker(chatId);
       } else if (data === "adm:workdays") {
@@ -2048,7 +2079,7 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
           );
         }
       } else if (data === "adm:none") {
-        // Free slot tap: keep silent, callback is already answered.
+        await sendTelegramMessage(botToken, chatId, "Свободно");
       }
     }
   }
