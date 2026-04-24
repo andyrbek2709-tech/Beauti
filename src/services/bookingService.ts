@@ -6,6 +6,7 @@ import { PoolClient } from "pg";
 import { config } from "../config";
 import { withTx } from "../db";
 import { BookingSource } from "../types";
+import { trackEvent } from "./controlTower";
 
 dayjs.extend(utc);
 dayjs.extend(timezone);
@@ -307,6 +308,7 @@ export async function bookAppointment(params: {
     }
 
     const response = { id: appointmentId, status: "booked" as const };
+    trackEvent("booking_created", { masterId: params.masterId, slotStartAt: params.slotStartAt, clientName: params.clientName, requestId: params.requestId, source: params.source });
     await saveIdempotentResponse(client, params.requestId, "book", response);
     return response;
   });
@@ -347,6 +349,7 @@ export async function cancelAppointment(params: {
     );
 
     const response = { id: params.appointmentId, status: "cancelled" as const };
+    trackEvent("booking_cancelled", { appointmentId: params.appointmentId, actor: params.actor });
     await saveIdempotentResponse(client, params.requestId, "cancel", response);
     return response;
   });
@@ -444,6 +447,7 @@ export async function bookAppointmentForSalon(params: {
       throw error;
     }
     const response = { id: appointmentId, status: "booked" as const };
+    trackEvent("booking_created", { salonId: params.salonId, slotStartAt: params.slotStartAt, clientName: params.clientName, requestId: params.requestId, source: params.source, telegramUserId: params.clientTelegramUserId });
     await saveIdempotentResponseBySalon(client, params.requestId, params.salonId, "book", response);
     return response;
   });
@@ -478,6 +482,7 @@ export async function cancelAppointmentForSalon(params: {
       [params.appointmentId, params.salonId, params.actor]
     );
     const response = { id: params.appointmentId, status: "cancelled" as const };
+    trackEvent("booking_cancelled", { salonId: params.salonId, appointmentId: params.appointmentId, actor: params.actor });
     await saveIdempotentResponseBySalon(client, params.requestId, params.salonId, "cancel", response);
     return response;
   });
