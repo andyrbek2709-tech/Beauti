@@ -26,6 +26,16 @@ function authHeader() {
   return { authorization: `Bearer ${token}`, "content-type": "application/json" };
 }
 
+function getSalonId() {
+  try {
+    if (!token) return "";
+    const payload = JSON.parse(atob(token.split(".")[1]));
+    return payload.salonId || "";
+  } catch {
+    return "";
+  }
+}
+
 async function showIntegrationIfAuthed() {
   if (inviteMode) return;
   if (!token) return;
@@ -409,26 +419,160 @@ document.getElementById("loadAppointmentsBtn").onclick = async () => {
     appointmentsMsg.className = "err";
     return;
   }
-  const resp = await fetch(`/admin/appointments?date=${encodeURIComponent(date)}`, {
-    headers: { authorization: `Bearer ${token}` }
-  });
-  const data = await resp.json();
-  if (!resp.ok) {
-    appointmentsMsg.textContent = data.message || "Ошибка загрузки записей";
+  appointmentsMsg.textContent = "Загрузка...";
+  appointmentsMsg.className = "muted";
+  const slotsGrid = document.getElementById("slotsGrid");
+  slotsGrid.innerHTML = "";
+
+  // Загружаем записи и доступность одновременно
+  const [apptResp, availResp] = await Promise.all([
+    fetch(`/admin/appointments?date=${encodeURIComponent(date)}`, {
+      headers: { authorization: `Bearer ${token}` }
+    }),
+    fetch(`/availability?salonId=${encodeURIComponent(getSalonId())}&from=${date}T00:00:00.000Z&to=${date}T23:59:59.999Z`)
+  ]);
+
+  if (!apptResp.ok) {
+    const data = await apptResp.json();
+    appointmentsMsg.textContent = data.message || "Ошибка загрузки";
     appointmentsMsg.className = "err";
     return;
   }
-  appointmentsMsg.textContent = `Записей: ${data.count}`;
-  appointmentsMsg.className = "ok";
-  const list = document.getElementById("appointmentsList");
-  list.innerHTML = "";
-  for (const item of data.items) {
-    const card = document.createElement("div");
-    card.className = "card";
-    const time = new Date(item.start_at).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
-    card.innerHTML = `<strong>${time}</strong><div class="muted">${item.client_name} (${item.client_phone}) - ${item.source}</div>`;
-    list.appendChild(card);
+
+  const apptData = await apptResp.json();
+  const availData = availResp.ok ? await availResp.json() : { slots: [] };
+
+  // Создаём карту записей по startAt
+  const apptByStart = new Map();
+  for (const item of apptData.items) {
+    apptByStart.set(new Date(item.start_at).toISOString(), item);
   }
+
+  const allSlots = availData.slots || [];
+
+  // Добавляем заблокированные слоты, которых нет в availability
+  for (const item of apptData.items) {
+    const key = new Date(item.start_at).toISOString();
+    if (!allSlots.find(s => new Date(s.startAt).toISOString() === key)) {
+      allSlots.push({ startAt: item.start_at, endAt: item.end_at, available: false, _fromAppt: true });
+    }
+  }
+  allSlots.sort((a, b) => new Date(a.startAt) - new Date(b.startAt));
+
+  if (!allSlots.length) {
+    appointmentsMsg.textContent = "На эту дату рабочих слотов нет";
+    appointmentsMsg.className = "muted";
+    return;
+  }
+
+  const booked = apptData.items.filter(i => !i.is_admin_block);
+  const blocked = apptData.items.filter(i => i.is_admin_block);
+  appointmentsMsg.textContent = `Слотов: ${allSlots.length} | Записей: ${booked.length} | Закрыто: ${blocked.length}`;
+  appointmentsMsg.className = "ok";
+
+  // Легенда
+  const legend = document.createElement("div");
+  legend.style.cssText = "display:flex;gap:12px;font-size:13px;color:#9ca3af;margin-bottom:10px;flex-wrap:wrap;";
+  legend.innerHTML = `
+    <span>👤 — клиент</span>
+    <span>🔒 — закрыто</span>
+    <span style="opacity:.7">○ — свободно</span>
+  `;
+  slotsGrid.appendChild(legend);
+
+  const grid = document.createElement("div");
+  grid.style.cssText = "display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:8px;";
+
+  for (const slot of allSlots) {
+    const key = new Date(slot.startAt).toISOString();
+    const appt = apptByStart.get(key);
+    const timeStr = new Date(slot.startAt).toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+    const isPast = new Date(slot.startAt) <= new Date();
+
+    const card = document.createElement("div");
+    card.style.cssText = `
+      background: #1f2937;
+      border: 1.5px solid ${appt ? (appt.is_admin_block ? "#f59e0b" : "#6366f1") : "#374151"};
+      border-radius: 10px;
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      cursor: ${appt || isPast ? "default" : "pointer"};
+      opacity: ${isPast && !appt ? 0.45 : 1};
+      transition: border-color .15s;
+    `;
+
+    if (appt && appt.is_admin_block) {
+      // Закрыто
+      card.innerHTML = `
+        <div style="font-weight:600;font-size:15px;">🔒 ${timeStr}</div>
+        <div style="font-size:12px;color:#f59e0b;">Закрыто</div>
+        <button data-unblock="${appt.id}" style="margin-top:4px;padding:4px 8px;font-size:12px;background:#1e3a2f;color:#34d399;border:1px solid #34d399;border-radius:6px;cursor:pointer;">✅ Открыть</button>
+      `;
+    } else if (appt) {
+      // Запись клиента
+      card.innerHTML = `
+        <div style="font-weight:600;font-size:15px;">👤 ${timeStr}</div>
+        <div style="font-size:12px;color:#e5e7eb;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${appt.client_name}">${appt.client_name}</div>
+        <div style="font-size:11px;color:#9ca3af;">${appt.client_phone}</div>
+      `;
+    } else {
+      // Свободно
+      card.innerHTML = `
+        <div style="font-weight:600;font-size:15px;color:#9ca3af;">○ ${timeStr}</div>
+        <div style="font-size:12px;color:#4b5563;">Свободно</div>
+        ${!isPast ? `<button data-block="${slot.startAt}" style="margin-top:4px;padding:4px 8px;font-size:12px;background:#1c2540;color:#818cf8;border:1px solid #6366f1;border-radius:6px;cursor:pointer;">🔒 Закрыть</button>` : ""}
+      `;
+    }
+
+    grid.appendChild(card);
+  }
+
+  slotsGrid.appendChild(grid);
+
+  // Обработка кнопок через делегацию
+  grid.addEventListener("click", async (e) => {
+    const btn = e.target.closest("button");
+    if (!btn) return;
+
+    if (btn.dataset.block) {
+      btn.disabled = true;
+      btn.textContent = "Закрываю...";
+      const resp = await fetch("/admin/slots/block", {
+        method: "POST",
+        headers: authHeader(),
+        body: JSON.stringify({ slotStartAt: btn.dataset.block })
+      });
+      if (resp.ok) {
+        document.getElementById("loadAppointmentsBtn").click();
+      } else {
+        const d = await resp.json();
+        appointmentsMsg.textContent = d.message || "Ошибка блокировки";
+        appointmentsMsg.className = "err";
+        btn.disabled = false;
+        btn.textContent = "🔒 Закрыть";
+      }
+    }
+
+    if (btn.dataset.unblock) {
+      btn.disabled = true;
+      btn.textContent = "Снимаю...";
+      const resp = await fetch(`/admin/slots/block/${btn.dataset.unblock}`, {
+        method: "DELETE",
+        headers: authHeader()
+      });
+      if (resp.ok) {
+        document.getElementById("loadAppointmentsBtn").click();
+      } else {
+        const d = await resp.json();
+        appointmentsMsg.textContent = d.message || "Ошибка разблокировки";
+        appointmentsMsg.className = "err";
+        btn.disabled = false;
+        btn.textContent = "✅ Открыть";
+      }
+    }
+  });
 };
 
 function showAdminPanels() {

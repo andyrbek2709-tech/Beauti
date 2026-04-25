@@ -156,12 +156,16 @@
     </section>
 
     <section class="card hidden" id="appointmentsCard">
-      <h2>Записи на день</h2>
-      <label>Дата</label>
-      <input id="appointmentsDate" type="date" />
-      <button id="loadAppointmentsBtn">Загрузить</button>
+      <h2>Расписание дня</h2>
+      <div class="row" style="align-items:flex-end;gap:10px;">
+        <div style="flex:1;">
+          <label>Дата</label>
+          <input id="appointmentsDate" type="date" />
+        </div>
+        <button id="loadAppointmentsBtn" style="margin-bottom:0;">Показать</button>
+      </div>
       <p id="appointmentsMsg"></p>
-      <div id="appointmentsList"></div>
+      <div id="slotsGrid"></div>
     </section>
   </main>
   <script src="/assets/admin-app.js"></script>
