@@ -83,7 +83,9 @@
   - `PUT /admin/settings`
   - `PUT /admin/working-rules`
   - `PUT /admin/exceptions`
-  - `GET /admin/appointments`
+  - `GET /admin/appointments` — возвращает только активные (`status='booked'`) записи на дату; в каждом элементе есть флаг `is_admin_block`.
+  - `POST /admin/slots/block` — закрыть свободный слот (тело: `{ "slotStartAt": "<ISO>" }`). Создаёт техническую запись со `status='booked'`, `is_admin_block=true`. Конфликт со существующей бронью → `409`.
+  - `DELETE /admin/slots/block/:appointmentId` — снять блокировку (переводит запись в `cancelled`, освобождая слот).
 
 ## Telegram capabilities (current)
 
@@ -106,6 +108,12 @@
 - Команда `/help` для мастера расширена: подробное описание всех кнопок, блоков меню и рабочих сценариев.
 - После регистрации и после сброса настроек по умолчанию применяется сетка `1 час` и горизонт записи `14 дней`.
 - Добавлен защитный fallback доступности: если рабочие правила еще не заданы, слоты строятся по базовому окну `10:00-20:00` (ежедневно), чтобы запись не "падала" в режим "слотов нет".
+- Ручная блокировка слота мастером (миграция `014_admin_slot_block.sql`):
+  - в дневном расписании пустой слот тапается → подтверждение «Закрыть слот ДД.ММ ЧЧ:ММ?» → `🔒 Закрыть`;
+  - закрытый слот помечается `🔒` и при повторном нажатии предлагает `✅ Снять блокировку`;
+  - технически создаётся `appointments` со `status='booked'`, `is_admin_block=true`, `client_phone='admin_block'` — благодаря уникальному индексу `uq_active_slot_per_salon` клиент в этот слот записаться не может (`409 slot_unavailable`);
+  - reminder-воркер блокировки игнорирует (фильтр `client_telegram_user_id IS NOT NULL`);
+  - аналогичная фича доступна и в веб-админке (`/admin`, раздел «Расписание дня»).
 
 ## Data consistency rules
 
@@ -121,9 +129,51 @@
 
 - API start command: `npm run start:api`
 - Worker start command: `npm run start:worker`
-- Migration: `npm run migrate`
+- Migration: `npm run migrate` — **не входит в startCommand**, миграции накатываются вручную после деплоя (см. ниже).
 - Required env: см. `.env.example`
 - Owner panel: `http://localhost:3000/owner` (создание invite-ссылок)
+
+### Production (Railway) — координаты и операции
+
+- Workspace: `andyrbek2709-tech's Projects`
+- Project: `exciting-friendship` (id `010fd185-e9e0-4d0b-8391-02402b3bf659`)
+- Environment: `production` (id `14cd9dae-dd7a-49aa-bf7f-f07b255f5da7`)
+- Service: `Beauti` (id `d9c70958-94a8-4c48-9242-27753215941c`)
+- Public URL: https://beauti-production.up.railway.app (`/health`, `/admin`, `/availability`, …)
+- Repo (auto-deploy from `main`): https://github.com/andyrbek2709-tech/Beauti
+- Postgres: отдельный сервис в том же проекте, переменная `DATABASE_URL` подключена в Beauti как reference.
+
+### CLI cheat sheet
+
+CLI лежит в `C:\Users\Admin\AppData\Roaming\npm\railway.cmd` (PowerShell `where.exe railway` его не находит — путь нужно давать целиком). Авторизация уже выполнена под `andyrbek2709@gmail.com`.
+
+```powershell
+# Привязать репозиторий к сервису (один раз на машину/папку)
+railway link `
+  --project 010fd185-e9e0-4d0b-8391-02402b3bf659 `
+  --environment 14cd9dae-dd7a-49aa-bf7f-f07b255f5da7 `
+  --service d9c70958-94a8-4c48-9242-27753215941c
+
+# Накатить миграции на прод-БД (использует переменные сервиса)
+railway run --service Beauti -- npm run migrate
+
+# Прод-логи (build/deploy/runtime)
+railway logs --service Beauti
+
+# Перезапустить последний деплой без пересборки
+railway restart --service Beauti
+
+# Передеплоить из main без пересборки кода
+railway redeploy --service Beauti
+
+# Посмотреть переменные окружения сервиса (KV-вид)
+railway variables --service Beauti --kv
+
+# Список деплоев
+railway deployment list --json
+```
+
+Деплой триггерится автоматически по push в `main` на GitHub. Миграции — **отдельный шаг**: после успешного деплоя обязательно вызывать `railway run --service Beauti -- npm run migrate`, иначе новые колонки/индексы в проде не появятся и эндпоинты под них упадут.
 
 ## Implementation phases
 
