@@ -103,11 +103,6 @@ export async function getAvailability(masterId: string, from: string, to: string
 }
 
 export async function getAvailabilityForSalon(salonId: string, from: string, to: string): Promise<SlotView[]> {
-  const fromDate = dayjs.tz(from, config.timezone);
-  const toDate = dayjs.tz(to, config.timezone);
-  const maxTo = dayjs().tz(config.timezone).startOf("day").add(config.bookingHorizonDays, "day");
-  const boundedTo = toDate.isAfter(maxTo) ? maxTo : toDate;
-
   const settingsRes = await withTx((client) =>
     client.query(
       "SELECT slot_duration_minutes, booking_horizon_days, timezone FROM master_settings WHERE salon_id = $1",
@@ -120,6 +115,12 @@ export async function getAvailabilityForSalon(salonId: string, from: string, to:
   const settings = settingsRes.rows[0];
   const slotDuration = Number(settings.slot_duration_minutes);
   const zone = String(settings.timezone || config.timezone);
+  const horizonDays = Number(settings.booking_horizon_days ?? config.bookingHorizonDays);
+
+  const fromDate = dayjs.tz(from, config.timezone);
+  const toDate = dayjs.tz(to, config.timezone);
+  const maxTo = dayjs().tz(config.timezone).startOf("day").add(horizonDays, "day");
+  const boundedTo = toDate.isAfter(maxTo) ? maxTo : toDate;
 
   const rulesRes = await withTx((client) =>
     client.query(
