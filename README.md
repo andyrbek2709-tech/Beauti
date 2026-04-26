@@ -376,6 +376,52 @@ railway deployment list --json
 - Итерация 2: API бронирования/отмены с защитой от коллизий.
 - Итерация 3: Multi-salon + admin self-service onboarding.
 - Итерация 4: Railway deployment baseline (api/worker/postgres).
+- Итерация 5 (2026-04-26): Упрощение UX «Рабочие дни», горизонт 30 дней, аудит изоляции.
+
+### Итерация 5 — детально
+
+**1. Telegram-бот «Рабочие дни» — новый флоу (commit `3c66d48`).**
+Раньше при выборе «Рабочие дни» открывался список из 7 кнопок-дней недели с toggle. Теперь:
+- Шаг 1: «Каждый день» / «Через день».
+- Шаг 2: «Сегодня» / «Завтра» (стартовая дата).
+- Шаг 3: график сразу сохраняется и активен на год вперёд.
+
+Реализация ([src/server.ts](src/server.ts) callback `adm:workdays`, `adm:workdays:type:*`, `adm:workdays:start:*`):
+- «Каждый день» → upsert все 7 дней в `working_rules` с `is_active = true`, любые активные `salon_work_patterns` деактивируются.
+- «Через день» → то же + INSERT в `salon_work_patterns` (`pattern_type='every_other_day'`, `anchor_date=startDate`, `period = startDate..startDate+1 year`).
+
+**2. Миграция 016: UNIQUE на `working_rules(salon_id, weekday)`.**
+Файл [src/migrations/016_working_rules_unique_constraint.sql](src/migrations/016_working_rules_unique_constraint.sql). Сначала дедупликация дублей, потом DROP старого индекса, потом ADD CONSTRAINT. Без этой миграции `ON CONFLICT (salon_id, weekday)` крашился с 500 («there is no unique or exclusion constraint matching the ON CONFLICT specification»).
+
+**3. Горизонт записи: 14 → 30 дней повсюду.**
+- `BOOKING_HORIZON_DAYS=30` на Railway (было 14, переменная перебивала дефолт кода).
+- [src/config.ts](src/config.ts): дефолт `bookingHorizonDays` 14 → 30.
+- [src/server.ts](src/server.ts): все INSERT в `master_settings` при регистрации/инвайте/clear-schedule (`60,30,2,…`), все `COALESCE(..., 30)`, fallback `?? 30`.
+- [src/services/bookingService.ts](src/services/bookingService.ts): `getAvailabilityForSalon` теперь читает `horizonDays` из `master_settings` конкретного салона (а не из глобального config). Per-salon settings всегда выигрывают над env.
+- [public/web-app.js](public/web-app.js): дефолт `toDate` = `today + 30 days`.
+- [src/server.ts](src/server.ts) Telegram-клиент: `renderDateChoices` slice `(0, 30)` (был 14).
+- [src/server.ts](src/server.ts) админская кнопка переименована «Следующие 30 дней», функция `renderAdmin30Days` берёт `length: 30`.
+- Бизнес-правило «1 запись на 14 дней» для клиента → теперь 30 (`interval '30 days'`, текст ошибки тоже).
+- Миграция 015 [src/migrations/015_booking_horizon_30days.sql](src/migrations/015_booking_horizon_30days.sql) — UPDATE существующих салонов 14 → 30.
+
+**Не трогали (это билинг, не горизонт):** `interval '14 days'` в `subscriptions`/`billing_events` — это trial-период новых салонов.
+
+**4. UI: Сегодня/Завтра наверх (commit `53b1d46`).**
+В Telegram-боте на экране «Записи» (callback `adm:section:bookings`) кнопки `Сегодня` / `Завтра` подняты над днями недели. Финальный порядок: Сегодня/Завтра → дни недели (2 в ряд) → «Следующие 30 дней» → «Главное меню».
+
+**5. Аудит изоляции салонов (commit `4db00a3`).**
+Прошёлся по всем INSERT/UPDATE/DELETE в `server.ts` и `bookingService.ts`.
+- Все HTTP `/admin/*` эндпоинты используют `req.admin!.salonId` из JWT — `salonId` физически не приходит из тела запроса.
+- Все Telegram-callback'и админа гейтятся проверкой `fromId === adminTelegramUserId` для конкретного `salon_id` из URL `/telegram/webhook/:salonId`.
+- Все WHERE/SET на `working_rules`, `master_settings`, `schedule_exceptions`, `salon_work_patterns`, `booking_pauses`, `telegram_admin_actions` фильтруются по `salon_id`.
+- Defense-in-depth: добавил `AND salon_id = $X` в три UPDATE на `appointments`, где раньше было только `WHERE id = $1` (ownership проверялся отдельным SELECT, эксплуатировать было нельзя, но теперь и сам UPDATE не пробьётся): подтверждение клиента по напоминанию, разблокировка слота админом через бот, разблокировка слота админом через web.
+- Мёртвый код в [src/services/bookingService.ts](src/services/bookingService.ts): функции `getAvailability` / `bookAppointment` / `cancelAppointment` (без salonId) от старой master-based архитектуры — нигде не вызываются.
+
+**Текущее состояние ENV (Railway, service Beauti):**
+- `BOOKING_HORIZON_DAYS=30`
+- `CANCEL_CUTOFF_HOURS=2`
+- `TZ=Europe/Moscow`
+- остальное — без изменений (`DATABASE_URL`, `JWT_SECRET`, `ADMIN_API_KEY`, `CONTROL_TOWER_API_URL`).
 
 ## Next priority backlog
 
