@@ -5,9 +5,9 @@ const availabilityMsg = document.getElementById("availabilityMsg");
 
 let selectedSlot = null;
 const today = new Date();
-const in14Days = new Date(today.getTime() + 14 * 24 * 60 * 60 * 1000);
+const in30Days = new Date(today.getTime() + 30 * 24 * 60 * 60 * 1000);
 document.getElementById("fromDate").value = today.toISOString().slice(0, 10);
-document.getElementById("toDate").value = in14Days.toISOString().slice(0, 10);
+document.getElementById("toDate").value = in30Days.toISOString().slice(0, 10);
 const params = new URLSearchParams(window.location.search);
 const salonIdFromQuery = params.get("salonId");
 if (salonIdFromQuery) {

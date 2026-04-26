@@ -995,7 +995,7 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
       : "нет ближайшей записи";
     const keyboardRows = chunkButtons(dayButtons, 2);
     keyboardRows.push([{ text: "Сегодня", callback_data: `adm:day:${today}` }, { text: "Завтра", callback_data: `adm:day:${tomorrow}` }]);
-    keyboardRows.push([{ text: "Следующие 14 дней", callback_data: "adm:days" }]);
+    keyboardRows.push([{ text: "Следующие 30 дней", callback_data: "adm:days" }]);
     keyboardRows.push([{ text: "Главное меню", callback_data: "adm:menu" }]);
     await sendTelegramMessage(
       botToken,
@@ -1496,7 +1496,7 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
                  AND client_telegram_user_id = $2
                  AND status = 'booked'
                  AND start_at >= now()
-                 AND start_at < now() + interval '14 days'
+                 AND start_at < now() + interval '30 days'
                ORDER BY start_at ASC
                LIMIT 1`,
               [salonId, fromId]
@@ -1513,7 +1513,7 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
               await sendTelegramMessage(
                 botToken,
                 chatId,
-                `Ограничение: 1 запись на 14 дней. У вас уже есть запись на ${when}.`,
+                `Ограничение: 1 запись на 30 дней. У вас уже есть запись на ${when}.`,
                 {
                   reply_markup: {
                     inline_keyboard: [[{ text: "Отменить текущую запись", callback_data: `bk:cancel:${existingInWindow.rows[0].id}` }]]
