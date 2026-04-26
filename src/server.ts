@@ -1647,46 +1647,64 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
       } else if (data === "adm:schedule") {
         await showScheduleMonthPicker(chatId);
       } else if (data === "adm:workdays") {
-        const rows = await pool.query(
-          `SELECT weekday, is_active
-           FROM working_rules
-           WHERE salon_id = $1`,
-          [salonId]
-        );
-        const state = new Map<number, boolean>();
-        for (const r of rows.rows) state.set(Number(r.weekday), Boolean(r.is_active));
-        const labels = ["Вс", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
-        const buttons = labels.map((label, weekday) => ({
-          text: `${label}: ${state.get(weekday) === false ? "не работает" : "работает"}`,
-          callback_data: `adm:wd:toggle:${weekday}`
-        }));
-        const kb = chunkButtons(buttons, 1);
-        kb.push([{ text: "Назад", callback_data: "adm:section:schedule" }]);
-        await sendTelegramMessage(botToken, chatId, "Рабочие дни", { reply_markup: { inline_keyboard: kb } });
-      } else if (data.startsWith("adm:wd:toggle:")) {
-        const weekday = Number(data.replace("adm:wd:toggle:", "").trim());
-        if (weekday < 0 || weekday > 6 || !Number.isFinite(weekday)) {
-          await sendTelegramMessage(botToken, chatId, "Некорректный день.");
+        await sendTelegramMessage(botToken, chatId, "Рабочие дни: выберите режим работы", {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "Каждый день", callback_data: "adm:workdays:type:everyday" }],
+              [{ text: "Через день", callback_data: "adm:workdays:type:everyother" }],
+              [{ text: "Назад", callback_data: "adm:section:schedule" }]
+            ]
+          }
+        });
+      } else if (data === "adm:workdays:type:everyday" || data === "adm:workdays:type:everyother") {
+        const typeKey = data === "adm:workdays:type:everyday" ? "everyday" : "everyother";
+        const typeLabel = typeKey === "everyday" ? "каждый день" : "через день";
+        await sendTelegramMessage(botToken, chatId, `Режим: ${typeLabel}.\nС какого дня начинаем?`, {
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: "Сегодня", callback_data: `adm:workdays:start:${typeKey}:today` }],
+              [{ text: "Завтра", callback_data: `adm:workdays:start:${typeKey}:tomorrow` }],
+              [{ text: "Назад", callback_data: "adm:workdays" }]
+            ]
+          }
+        });
+      } else if (data.startsWith("adm:workdays:start:")) {
+        const parts = data.split(":");
+        const typeKey = parts[3] ?? "";
+        const when = parts[4] ?? "";
+        if (!["everyday", "everyother"].includes(typeKey) || !["today", "tomorrow"].includes(when)) {
+          await sendTelegramMessage(botToken, chatId, "Некорректный параметр.");
         } else {
-          const row = await pool.query(
-            `SELECT start_minute, end_minute, is_active
-             FROM working_rules
-             WHERE salon_id = $1 AND weekday = $2
-             LIMIT 1`,
-            [salonId, weekday]
-          );
-          const currentActive = row.rowCount ? Boolean(row.rows[0].is_active) : true;
-          const startMinute = row.rowCount ? Number(row.rows[0].start_minute) : 600;
-          const endMinute = row.rowCount ? Number(row.rows[0].end_minute) : 1200;
+          const startDate = dayjs().tz(salonTimezone).add(when === "tomorrow" ? 1 : 0, "day").format("YYYY-MM-DD");
+          for (let wd = 0; wd <= 6; wd++) {
+            await pool.query(
+              `INSERT INTO working_rules (salon_id, weekday, start_minute, end_minute, is_active)
+               VALUES ($1,$2,600,1200,true)
+               ON CONFLICT (salon_id, weekday) DO UPDATE SET is_active = true`,
+              [salonId, wd]
+            );
+          }
           await pool.query(
-            `INSERT INTO working_rules (salon_id, weekday, start_minute, end_minute, is_active)
-             VALUES ($1,$2,$3,$4,$5)
-             ON CONFLICT (salon_id, weekday) DO UPDATE
-             SET is_active = EXCLUDED.is_active`,
-            [salonId, weekday, startMinute, endMinute, !currentActive]
+            "UPDATE salon_work_patterns SET is_active = false, updated_at = now() WHERE salon_id = $1",
+            [salonId]
           );
-          await sendTelegramMessage(botToken, chatId, "День обновлен.");
-          await sendTelegramMessage(botToken, chatId, "График", { reply_markup: scheduleMenuKeyboard() });
+          if (typeKey === "everyother") {
+            const endDate = dayjs(startDate).add(1, "year").format("YYYY-MM-DD");
+            await pool.query(
+              `INSERT INTO salon_work_patterns
+                (salon_id, period_start, period_end, pattern_type, anchor_date, is_active, updated_at)
+               VALUES ($1,$2::date,$3::date,'every_other_day',$2::date,true,now())`,
+              [salonId, startDate, endDate]
+            );
+          }
+          const typeLabel = typeKey === "everyday" ? "Каждый день" : "Через день";
+          const whenLabel = when === "today" ? "с сегодня" : "с завтра";
+          await sendTelegramMessage(
+            botToken,
+            chatId,
+            `✅ График сохранён: ${typeLabel}, ${whenLabel} (${startDate}).`,
+            { reply_markup: adminMenuKeyboard() }
+          );
         }
       } else if (data === "adm:worktime") {
         await sendTelegramMessage(botToken, chatId, "Рабочее время", {
