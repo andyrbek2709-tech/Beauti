@@ -756,7 +756,7 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
       }
     }
     const buttons = Array.from(dates.entries())
-      .slice(0, 14)
+      .slice(0, 30)
       .map(([key, label]) => ({ text: label, callback_data: `bk:date:${key}` }));
     await sendTelegramMessage(botToken, chatId, "Выберите дату:", {
       reply_markup: { inline_keyboard: chunkButtons(buttons, 2) }
@@ -1109,8 +1109,8 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
     );
   };
 
-  const renderAdmin14Days = async (chatId: number) => {
-    const days = Array.from({ length: 14 }, (_, i) => dateKeyByOffset(i));
+  const renderAdmin30Days = async (chatId: number) => {
+    const days = Array.from({ length: 30 }, (_, i) => dateKeyByOffset(i));
     const buttons: Array<{ text: string; callback_data: string }> = [];
     for (const d of days) {
       const countRes = await pool.query(
@@ -2067,7 +2067,7 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
       } else if (data === "adm:after") {
         await renderAdminDay(chatId, dateKeyByOffset(2));
       } else if (data === "adm:days") {
-        await renderAdmin14Days(chatId);
+        await renderAdmin30Days(chatId);
       } else if (data.startsWith("adm:day:")) {
         await renderAdminDay(chatId, data.replace("adm:day:", "").trim());
       } else if (data.startsWith("adm:block:start:")) {
