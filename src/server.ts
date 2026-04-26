@@ -1619,7 +1619,7 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
           return res.json({ ok: true, duplicate: false });
         }
         if (!own.rows[0].client_confirmed_at) {
-          await pool.query("UPDATE appointments SET client_confirmed_at = now() WHERE id = $1", [appointmentId]);
+          await pool.query("UPDATE appointments SET client_confirmed_at = now() WHERE id = $1 AND salon_id = $2", [appointmentId, salonId]);
           const when = new Intl.DateTimeFormat("ru-RU", {
             timeZone: salonTimezone,
             weekday: "short",
@@ -2165,8 +2165,8 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
           await sendTelegramMessage(botToken, chatId, "Блокировка не найдена или уже снята.");
         } else {
           await pool.query(
-            "UPDATE appointments SET status='cancelled', cancelled_at=now(), cancelled_by='admin' WHERE id=$1",
-            [apptId]
+            "UPDATE appointments SET status='cancelled', cancelled_at=now(), cancelled_by='admin' WHERE id=$1 AND salon_id=$2",
+            [apptId, salonId]
           );
           await pool.query(
             "INSERT INTO audit_logs (salon_id, action, payload_json) VALUES ($1,'admin_unblock_slot',$2)",
@@ -2616,8 +2616,8 @@ app.delete("/admin/slots/block/:id", adminOnly, async (req: AuthedRequest, res) 
   if (!row.rowCount) return res.status(404).json({ message: "Блокировка не найдена" });
   await withTx(async (client) => {
     await client.query(
-      "UPDATE appointments SET status='cancelled', cancelled_at=now(), cancelled_by='admin' WHERE id=$1",
-      [apptId]
+      "UPDATE appointments SET status='cancelled', cancelled_at=now(), cancelled_by='admin' WHERE id=$1 AND salon_id=$2",
+      [apptId, salonId]
     );
     await client.query(
       "INSERT INTO audit_logs (salon_id, actor_admin_id, action, payload_json) VALUES ($1,$2,'admin_unblock_slot',$3)",
