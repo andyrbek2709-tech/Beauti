@@ -993,8 +993,9 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
           minute: "2-digit"
         }).format(new Date(String(nearest.start_at)))} - ${nearest.client_name}`
       : "нет ближайшей записи";
-    const keyboardRows = chunkButtons(dayButtons, 2);
+    const keyboardRows: Array<Array<{ text: string; callback_data: string }>> = [];
     keyboardRows.push([{ text: "Сегодня", callback_data: `adm:day:${today}` }, { text: "Завтра", callback_data: `adm:day:${tomorrow}` }]);
+    keyboardRows.push(...chunkButtons(dayButtons, 2));
     keyboardRows.push([{ text: "Следующие 30 дней", callback_data: "adm:days" }]);
     keyboardRows.push([{ text: "Главное меню", callback_data: "adm:menu" }]);
     await sendTelegramMessage(
