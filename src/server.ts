@@ -176,7 +176,7 @@ app.post("/auth/register", async (req, res) => {
       ]);
       await client.query(
         `INSERT INTO master_settings (salon_id, slot_duration_minutes, booking_horizon_days, cancel_cutoff_hours, timezone)
-         VALUES ($1,60,14,2,$2)`,
+         VALUES ($1,60,30,2,$2)`,
         [salonId, config.timezone]
       );
       await client.query(
@@ -373,7 +373,7 @@ app.post("/auth/accept-invite", async (req, res) => {
       ]);
       await client.query(
         `INSERT INTO master_settings (salon_id, slot_duration_minutes, booking_horizon_days, cancel_cutoff_hours, timezone)
-         VALUES ($1,60,14,2,$2)`,
+         VALUES ($1,60,30,2,$2)`,
         [salonId, config.timezone]
       );
       await client.query(
@@ -727,7 +727,7 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
     [salonId]
   );
   const salonTimezone = String(settingsRow.rows[0]?.timezone ?? config.timezone);
-  const horizonDays = Number(settingsRow.rows[0]?.booking_horizon_days ?? 14);
+  const horizonDays = Number(settingsRow.rows[0]?.booking_horizon_days ?? 30);
 
   const renderDateChoices = async (chatId: number) => {
     const from = new Date().toISOString();
@@ -1767,7 +1767,7 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
              VALUES (
                $1,
                $2,
-               COALESCE((SELECT booking_horizon_days FROM master_settings WHERE salon_id = $1), 14),
+               COALESCE((SELECT booking_horizon_days FROM master_settings WHERE salon_id = $1), 30),
                COALESCE((SELECT cancel_cutoff_hours FROM master_settings WHERE salon_id = $1), 2),
                COALESCE((SELECT timezone FROM master_settings WHERE salon_id = $1), $3)
              )
@@ -1818,10 +1818,10 @@ app.post("/telegram/webhook/:salonId", async (req, res) => {
         }
         await pool.query(
           `INSERT INTO master_settings (salon_id, slot_duration_minutes, booking_horizon_days, cancel_cutoff_hours, timezone)
-           VALUES ($1,60,14,2,$2)
+           VALUES ($1,60,30,2,$2)
            ON CONFLICT (salon_id) DO UPDATE
            SET slot_duration_minutes = 60,
-               booking_horizon_days = 14,
+               booking_horizon_days = 30,
                cancel_cutoff_hours = 2,
                timezone = COALESCE(master_settings.timezone, EXCLUDED.timezone)`,
           [salonId, config.timezone]

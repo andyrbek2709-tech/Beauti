@@ -8,7 +8,7 @@ export const config = {
   port: Number(env.PORT ?? 3000),
   databaseUrl: env.DATABASE_URL ?? "",
   timezone: env.TZ ?? "Europe/Moscow",
-  bookingHorizonDays: Number(env.BOOKING_HORIZON_DAYS ?? 14),
+  bookingHorizonDays: Number(env.BOOKING_HORIZON_DAYS ?? 30),
   cancelCutoffHours: Number(env.CANCEL_CUTOFF_HOURS ?? 2),
   masterTelegramId: env.MASTER_TELEGRAM_ID ?? "",
   botToken: env.BOT_TOKEN ?? "",
